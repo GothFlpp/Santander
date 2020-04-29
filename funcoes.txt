@@ -1,0 +1,3362 @@
+﻿#env_conf
+HK3_S500_D40; --driver-memory 40g --num-executors 10 --executor-memory 40g --executor-cores 6 --conf spark.sql.shuffle.partitions=500
+HK3_S1000_D40; --driver-memory 40g --num-executors 10 --executor-memory 40g --executor-cores 6 --conf spark.sql.shuffle.partitions=1000
+HK3_S1500_D40; --driver-memory 40g --num-executors 10 --executor-memory 40g --executor-cores 6 --conf spark.sql.shuffle.partitions=1500
+HK3_S2000_D40; --driver-memory 40g --num-executors 10 --executor-memory 40g --executor-cores 6 --conf spark.sql.shuffle.partitions=2000
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#SHELL'S
+
+#EXPURGO
+#=================================================================================#
+# Shell    : EXP_MENSAL_ROR.SH                                                    #
+# Objetivo : Shell de expurgo ROR                                                 #
+# Autor    : Gabriel Fiore (Beijaflore)                                           #
+# Data     : Fevereiro/2020                                                       #
+#----------------------------- Alteracoes ----------------------------------------#
+# Objetivo :                                                                      #
+# Data     :                                                                      #
+# Autor    :                                                                      #
+#------------------------ Parametros Obrigatorios --------------------------------#
+#>>> $1 = USUARIO                                                                 #
+#>>> $2 = BANCO                                                                   #
+#>>> $3 = TABELA                                                                  #
+#>>> $4 = O_DATE                                                                  #
+#>>> $5 = RETENCAO                                                                #
+#=================================================================================#
+
+#---------------------- Validacao dos Parametros de Entrada ----------------------#
+
+errors="========================= CODIGOS DE SAIDA ============================  \n
+Codigos de saida de finalizacao do JOB reconhecidos sao:                         \n
+{ 0 } - Arquivo processado com sucesso                                           \n
+{ 1 } - Falta de 1 ou mais parametros obrigatorios                               \n
+{ 2 } - O_date com data invalida para expurgo                                    \n
+===============================================================================   "
+
+#source ./ENV_PARMS.SH
+
+vrc=0
+
+v_TOTVAR=$#
+
+if [ $v_TOTVAR -lt 5 ]
+then
+  vrc=1
+  echo ">>>---------------------- PARAMETROS OBRIGATORIOS ----------------------------<<<"
+  echo ">>> \$1 = USUARIO                                                                "
+  echo ">>> \$2 = BANCO                                                                  "
+  echo ">>> \$3 = TABELA                                                                 "
+  echo ">>> \$4 = ODATE                                                                  "
+  echo ">>> \$5 = RETENCAO                                                             "
+  echo ">>>---------------------------------------------------------------------------<<<"
+  echo -e ">>> Exit Code=$vrc                                                          \n"
+  echo -e $errors
+  exit $vrc
+fi
+
+echo -e ">>>-------- ATRIBUINDO VARIAVEIS -----------------------------<<<\n"
+USUARIO=$1
+BANCO=$2
+TABELA=$3
+ODATE=$4
+RETENCAO=$5
+
+kinit -k -t /produtos/bdr/keytab/${USUARIO}.keytab ${USUARIO}
+
+SYS_DATE=$(date +%Y%m%d)
+DATE_RET=`date -d "$SYS_DATE - 1 year" +%Y%m`;
+
+
+echo -e ">>>-------- VALIDANDO DATA DE RETENÇÃO ${DATE_RET} ------------------<<<\n"
+if [ ${RETENCAO} -lt 12 ]
+then
+  DATE_RET=`date -d "$SYS_DATE - 1 year" +%Y%m`;
+  echo -e ">>>-------- MANTENDO RETENÇÃO DE SEGURANÇA ${DATE_RET} ------------------<<<\n"
+else
+  DATE_RET=`date -d "${SYS_DATE} -${RETENCAO} month" +%Y%m`;
+  echo -e ">>>-------- SETANDO RETENÇÃO DE SEGURANÇA ${DATE_RET} ------------------<<<\n"
+fi
+echo -e ">>>-------- DATA DE RETENÇÃO - OK -----------------------------<<<\n"
+
+
+echo -e ">>>-------- VALIDANDO DATA DE SEGURANÇA ${DATE_RET} ------------------<<<\n"
+if [ `date -d ${ODATE} +%Y%m` -ge ${DATE_RET} ]
+then
+  vrc=2
+  echo -e ">>>-------- NÃO É PERMITIDO REMOVER ESTA PARTIÇÃO -------------<<<\n"
+  echo -e ">>> Exit Code=$vrc                                                          \n"
+  echo -e $errors
+  exit $vrc
+fi
+echo -e ">>>-------- DATA DE SEGURANÇA - OK -----------------------------<<<\n"
+
+
+echo -e ">>>-------- VALIDACAO DE VARIAVEIS ---------------------------<<<\n"
+echo -e ">>>-------- USUARIO = ${USUARIO}\n"
+echo -e ">>>-------- BANCO = ${BANCO}\n"
+echo -e ">>>-------- TABELA = ${TABELA}\n"
+echo -e ">>>-------- ODATE = ${ODATE}\n"
+echo -e ">>>-------- RETENÇÃO = ${RETENCAO}\n"
+echo -e ">>>-------- VALIDACAO DE VARIAVEIS - OK ----------------------<<<\n"
+
+
+echo -e ">>>-------- TRATANDO RETENÇÃO -${RETENCAO} MESES ----------------<<<\n"
+
+
+echo -e ">>>-------- PARTIÇÕES DA TABELA: ${TABELA}---------------------<<<\n"
+hive -e "show partitions ${BANCO}.${TABELA}";
+
+
+echo -e ">>>-------- REMOVENDO PARTIÇÕES ANTERIORES A ${DATE_RET} -------------<<<\n"
+hive -e "select distinct(dt_ref) from ${BANCO}.${TABELA} where dt_ref < ${DATE_RET}";
+
+
+echo -e ">>>-------- PARTIÇÕES EXCLUIDAS ---------------------------------<<<\n"
+hive -e "ALTER TABLE ${BANCO}.${TABELA} DROP IF EXISTS PARTITION (dt_ref < ${DATE_RET})";
+
+
+echo -e ">>>-------- EXPURGO REALIZADO COM SUCESSO -----------------------<<<\n"
+
+
+echo -e ">>>-------- PARTIÇÕES MANTIDAS ----------------------------------<<<\n"
+hive -e "show partitions ${BANCO}.${TABELA}";
+
+
+echo $vrc
+
+#CORP
+#!/bin/bash
+
+#=========================================================================================================================================================#
+# Shell    : ror_run_cross_corp.sh                                                                                                                        #
+# Objetivo : Shell para executar processo SPARK                                                                                                           #
+# Autor    : Gabriel Fiore (Beijaflore)                                                                                                                   #
+# Data     : Agosto/2019                                                                                                                                  #
+#----------------------------- Alteracoes ----------------------------------------------------------------------------------------------------------------#
+# Objetivo : Adicionar parametros para agrupamento por contrato                                                                                           #
+# Data     : Setembro/2019                                                                                                                                #
+# Autor    : Gabriel Fiore (Beijaflore)                                                                                                                   #
+#
+# Chamada ex : sh ror_run_cross_corp.sh cross_corp ros_bdata_d ror smart_ror tb_contrato_bdr_altair tb_contrato_nme_bdr tb_parametro_rateio 20190810 DEV2 #
+#
+#----------------------------- Alteracoes ----------------------------------------------------------------------------------------------------------------#
+# Objetivo :                                                                      #
+# Data     :                                                                      #
+# Autor    :                                                                      #
+#------------------------ Parametros Obrigatorios --------------------------------#
+#>>> $1 = Nome do workflow                                                        #
+#>>> $2 = Usuario                                                                 #
+#>>> $3 = Banco de dados ROR                                                      #
+#>>> $4 = Banco de dados SMART_ROR                                                #
+#>>> $5 = Tabela TB_CONTRATO_BDR_ALTAIR                                           #
+#>>> $6 = Tabela TB_CONTRATO_NME_BDR                                              #
+#>>> $7 = Tabela TB_PARAMETRO_RATEIO                                              #
+#>>> $8 = O_DATE                                                                  #
+#>>> $9 = ENV_CONF                                                                #
+#=================================================================================#
+
+#---------------------- Validacao dos Parametros de Entrada ----------------------#
+errors="======================== Codigos de saida =============================== \n
+Codigos de saida de finalizacao do JOB: \n
+{ 0 } - Processo executado com sucesso \n
+{ 1 } - Erro na execucao do script python \n
+{ 2 } - Falta de 1 ou mais parametros \n
+{ 3 } - Parametro de configuracao invalido \n
+========================================================================"
+
+#source ./env_params.sh
+
+vrc=0
+now="$(date +%d%m%Y%H%M%S)"
+NOMESHELL=$(basename $0)
+WORKFLOW_PATH="${BASE_DIR}/sistema/ror/scripts/workflow/"
+PARAM_PATH="${WORKFLOW_PATH}/param"
+TXT_PATH="${BASE_DIR}/sistema/ror/scripts/txt/env_conf.txt"
+VERSAO=$(which spark2-submit 2>/dev/null | wc -l)
+
+if [[("$VERSAO" == "1")]]
+then
+    SPARK_SUBMIT='spark2-submit'
+else
+    SPARK_SUBMIT='spark-submit'
+fi
+
+ZIP_FOLDER="${BASE_DIR}/sistema/ror/temp"
+ZIP_WORKFLOW="${ZIP_FOLDER}/${1}_${now}.zip"
+ZIP_PARAM="${ZIP_FOLDER}/${1}_param_${now}.zip"
+
+echo ">>> Iniciando $NOMESHELL                                                    "
+echo -e ">>> Validacao de variaveis                                             \n"
+
+v_TOTVAR=$#
+
+if [ $v_TOTVAR -lt 9 ]
+then
+  vrc=2
+  echo ">>>--------------------- PARAMETROS OBRIGATORIOS ---------------------<<< "
+  echo ">>> \$1 = Workflow do processo                                            "
+  echo ">>> \$2 = Usuario                                                         "
+  echo ">>> \$3 = Banco de dados ROR                                              "
+  echo ">>> \$4 = Banco de dados SMART_ROR                                        "
+  echo ">>> \$5 = Tabela TB_CONTRATO_BDR_ALTAIR                                   "
+  echo ">>> \$6 = Tabela TB_CONTRATO_NME_BDR                                      "
+  echo ">>> \$7 = Tabela TB_PARAMETRO_RATEIO                                      "
+  echo ">>> \$8 = O_DATE                                                          "
+  echo ">>> \$9 = ENV_CONF                                                        "
+  echo -e ">>> Exit Code=$vrc                                                   \n"
+  echo -e $errors
+  exit $vrc
+fi
+
+echo ">>> Parametros de processamento OK!"
+
+#--------------------------- Atribuicao de variaveis -----------------------------#
+echo -e ">>> Atribuindo variaveis                                               \n"
+WORKFLOW=$1                                                                       # Workflow do processo
+USUARIO=$2                                                                        # Usuario
+DATABASE=$3                                                                       # database ROR
+DATABASE_SMART=$4                                                                 # database SMART_ROR
+TB_ALTAIR=$5                                                                      # Tabela BDR_CHECKPOINT
+TB_NME_BDR=$6                                                                     # Tabela MIS_CHECKPOINT
+TB_PARAMETRO=$7                                                                   # Tabela PARAMETRO_RATEIO
+ODATE=$8                                                                          # ODATE
+if [ ! `awk -F";" -v OFS=';' '$1=="'$9'" {print $1}' $TXT_PATH` ]   	            #    |
+then										                                                          #    |
+  echo ">>> ENV_CONF invalido"							                                      #    |
+  vrc=3										                                                        #    |
+  echo ">>> Exit Code=$vrc                                                        "
+  echo "                                                                          "
+  echo -e $errors                                                                 #    |
+  exit $vrc									                                                      #    |
+else										                                                          #    |
+  ENV_CONF=`awk -F";" -v OFS=';' '$1=="'$9'" {print $2}' $TXT_PATH`               #    |
+fi										                                                            # ENV_CONF
+
+#--------------------------- Inicio do processamento -----------------------------#
+echo ">>>*************************************************************************"
+echo ">>>***                 Execucao de Processo de Workflow                  ***"
+echo ">>>*************************************************************************"
+echo ">>> Processo: $WORKFLOW                                                     "
+echo ">>>                                                                         "
+echo ">>> Parametros de Execucao: 						                                    "
+now="$(date +%d%m%Y%H%M%S)"
+echo -e ">>> Data/Hora inicio: $(date +%d/%m/%Y\ %H:%M:%S)                        "
+echo ">>> Workflow = $WORKFLOW                                                    "
+echo ">>> ODATE = $ODATE                                                          "
+echo ">>> ENV_CONF = $9                                                           "
+echo ">>>-------------------------------------------------------------------------"
+
+kinit -k -t /produtos/bdr/keytab/${USUARIO}.keytab ${USUARIO}
+
+if [ -e "${ZIP_WORKFLOW}" ]
+then
+  rm $ZIP_WORKFLOW
+fi
+
+if [ -e "${ZIP_PARAM}" ]
+then
+  rm $ZIP_PARAM
+fi
+
+cd $WORKFLOW_PATH && zip -r $ZIP_WORKFLOW *
+cd $PARAM_PATH && zip -r $ZIP_PARAM *
+
+cd $WORKFLOW_PATH
+
+# SPARK SUBMIT 2
+echo ">>> Iniciando $SPARK_SUBMIT                                                 "
+echo -e "comando de chamada python:                                               "
+$SPARK_SUBMIT                                                             	      \
+--master yarn                                                                     \
+--deploy-mode cluster                                                	 	          \
+$ENV_CONF                                                                         \
+--conf spark.yarn.log-aggregation-enable=true                       		          \
+--conf spark.dynamicAllocation.enabled=false                                      \
+--conf spark.app.name='CROSS CORP'                                                \
+--py-files $ZIP_WORKFLOW                                                          \
+--archives "$ZIP_PARAM#param"                                                     \
+"$WORKFLOW.py"                                                                    \
+--workflow $WORKFLOW                                                              \
+--user $USUARIO 							                                                    \
+--database $DATABASE                                                              \
+--database_smart $DATABASE_SMART                                                  \
+--tb_altair_name $TB_ALTAIR					                                              \
+--tb_nme_bdr_name $TB_NME_BDR                                                     \
+--tb_parametro_name $TB_PARAMETRO                                                 \
+--o_date $ODATE
+
+vrc=$?
+if [ $vrc = "0" ]
+then
+  echo ">>> PROCESSO executado com sucesso                                        "
+else
+  echo ">>> ERRO durante processo SPARK                                           "
+  echo -e ">>> Exit Code=$vrc                                                   \n"
+  echo -e $errors
+  exit $vrc
+fi
+
+echo -e ">>>                                                                    \n"
+echo ">>>-------------------------------------------------------------------------"
+echo ">>> Fim do Processo: $WORKFLOW                                              "
+echo -e ">>> Data/Hora fim: $(date +%d/%m/%Y\ %H:%M:%S)                           "
+echo ">>> Parametros de Execucao:						                                      "
+echo ">>> USUARIO = $USUARIO                                             		      "
+echo ">>> DATABASE  = $DATABASE                                           	      "
+echo ">>> DATABASE_SMART  = $DATABASE_SMART                                      	"
+echo ">>> TABELA tb_altair = $TB_ALTAIR                                           "
+echo ">>> TABELA tb_nme_bdr = $TB_NME_BDR                                         "
+echo ">>> TABELA tb_parametro = $TB_PARAMETRO                                     "
+echo ">>> ODATE = $ODATE                                                    		  "
+echo ">>> ENV_CONF = $9                                                       	  "
+echo ">>>-------------------------------------------------------------------------"
+echo -e ">>> Exit Code=$vrc                                                     \n"
+echo -e $errors
+exit $vrc
+
+
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+
+#Arquivo - get_spark.py
+
+# -*- coding: utf-8 -*-
+#Modulo de configuracao da variavel spark
+from pyspark.sql import SparkSession
+
+class Session:
+
+    def __init__(self, appName = "mySparkApp", spark = "spark"):
+        self.appName = appName
+        self.spark = spark
+
+    def GetSpark(self):
+        
+        """
+        Exemplo de chamada do spark session
+        spark = SparkSession
+            .builder
+            .appName(appName)
+            .enableHiveSupport()
+            .config("key1", "val1")
+            .config("key2", "val2")
+            .GetOrCreate()
+        """
+
+        confs = {
+            "hive.exec.dynamic.partition":"true",
+            "hive.exec.dynamic.partition.mode":"nonstrict",
+            "spark.sql.crossJoin.enabled":"True",
+            "spark.sql.hive.convertMetastoreParquet":"False",
+            "hive.exec.parallel":"True"
+        }
+
+        spark_builder = (
+            SparkSession
+                .builder
+                .appName(self.appName)
+                .enableHiveSupport()
+        )
+
+        for key, val in confs.items():
+            spark_builder.config(key, val)
+
+        self.spark = spark_builder.getOrCreate()
+        
+        return self.spark
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+
+#Arquivo - source.py
+import sys
+import logging
+import json
+from os import path
+from pyspark.sql import SQLContext, SparkSession, HiveContext
+from pyspark import SparkContext, SparkConf
+
+def read_parquet(path, sc):
+    # Realiza a leitura do parquet a partir do path passado no parametro
+    try:
+        df_return = SQLContext(sc).read.parquet(path)
+    except:
+        logging.info('FALHA AO CARREGAR ARQUIVO')
+        df_return = None
+    return df_return
+
+def read_json(file):
+    # Efetua a leitura do json de configuracao e parametrrizacao
+    with open('param/{}.json'.format(file), 'r') as f:
+        config = json.load(f)
+    return config
+
+def read_csv(path_name, sc):
+    # Realiza a leitura do csv a partir do path passado no parametro
+    df = SQLContext(sc).read.csv('{}{}.csv'.format(path_name), quote='"', sep=',', header=True, inferSchema=True)
+    return df
+
+def read_hive(spark, db, table, fields, dt_ref, anomes):
+    query = """
+        SELECT {fields} 
+        FROM {db}.{table} 
+        WHERE {dt_ref}='{anomes}'
+        """.format(fields=fields,db=db,table=table,anomes=anomes,dt_ref=dt_ref)
+    logging.info(query)
+    return spark.sql(query)
+#df_rateio_final = source.read_hive(spark, database_smart, tb_contrato_rateio_final, fields, 'dt_ref', data_mes).drop('dt_ref')
+
+def verify_integrity(df_main, df_other, key):
+	    df_ok = df_main.join(df_other, key, 'left')
+	    return df_ok
+#df_main = verify_integrity(df_main, df_capit_ries, 'contra1', 'r9624_contra1', 'left')
+
+def joinnerV2(df1, df2, key1, key2, join='inner'):
+    df_join = df1 \
+        .join(df2, df1[key1] == df2[key2], join)
+    return df_join
+#df_join = joinnerV2(df_atual_rorwa, df_ant_rorwa_hist, 'CONTRATO', 'CONTRATO_HIST', 'full_outer')
+
+def filter_df(df_in, value_in):
+    logging.info('FILTRANDO DATAFRAME DE ENTRADA')
+    df_out = df_in.filter(value_in)
+    return df_out
+#df_interv_cto = filter_df(df_interv_cto, 'tipintev == 1')
+
+def drop_column(df_in, value_in):
+    logging.info('DROPANDO OS CAMPOS A SEGUIR: {}'.format(value_in))
+    df_out = df_in.drop(value_in)
+    return df_out
+#df_interv_cto = drop_column(df_interv_cto, 'tipintev')
+
+def select_column(df_in, value_in):
+    logging.info('SELECIONANDO A(S) SEGUINTE(S) COLUNA(S): {}'.format(value_in))
+    df_out = df_in.select(value_in)
+    return df_out
+#df_main = select_column(df_main, dataframes['dataframe']['df_bdr_rorwa']['colunas'])
+
+def rename_column(df_in, old_name, new_name):
+    logging.info('ALTERANDO O NOME DA COLUNA {} PARA {}'.format(old_name, new_name))
+    df_out = df_in.withColumnRenamed(old_name, new_name)
+    return df_out
+#df_main = rename_column(df_main, 'contra1', 'CONTRA1_BIS')
+
+def union_df(df_main, df_outer):
+    logging.info('EFETUANDO UNION DOS DATAFRAMES')
+    df_out = df_main.union(df_outer)
+    return df_out
+#df_out = union_df(df_out, df_out_fic)
+
+def create_column(df_in, column_new, value_in, mode):
+    if mode.lower() == 'col':
+        logging.info('CRIANDO COLUNA {} A PARTIR DA COLUNA {}'.format(column_new, value_in))
+        df_out = df_in.withColumn(column_new, col(value_in))
+    elif mode.lower() == 'sql':
+        logging.info('CRIANDO COLUNA {} A PARTIR DA SEGUINTE EXPRESSAO SQL: {}'.format(column_new, value_in))
+        df_out = df_in.withColumn(column_new, expr(value_in))
+    elif mode.lower() == 'lit':
+        logging.info('CRIANDO COLUNA {} A PARTIR DO CAMPO: {}'.format(column_new, value_in))
+        df_out = df_in.withColumn(column_new, lit(value_in))
+    else:
+        df_out = df_in
+    return df_out
+#df_out_fic = create_column(df_out_fic, 't0254_contra1', '-99200', 'lit')
+#df_main = create_column(df_main, 'contra1', 'if(contra1 is null, t0254_contra1, contra1)', 'sql')
+#for name in columns_list:
+        #df_main = create_column(df_main, name, 0, 'lit')
+
+#Funcao que adiciona -99300 em campos duplicados
+def dupl_99300(df, coluna_id, coluna):
+    logging.info("ADICIONANDO '-99300' NOS CAMPOS DUPLICADOS DE: " + str(coluna))
+    df_main4 = df \
+        .withColumn(coluna, 
+            when(col(coluna_id) != lit(1), lit(-99300)).otherwise(col(coluna)))
+    return df_main4
+#df_capit_ries = dupl_99300(df_capit_ries, 'id', 'r9624_udad_rgo')
+#df_capit_ries = dupl_993(df_capit_ries, 'id', 'r9624_pd_cer')
+
+
+
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+
+#Arquivo - target.py
+import sys
+import logging
+from pyspark.sql import SQLContext, SparkSession, HiveContext
+from pyspark import SparkContext, SparkConf
+
+SparkConf().setIfMissing("hive.execution.engine", "spark")
+SparkConf().setIfMissing("spark.debug.maxToStringFields", "100")
+
+def save_all(df_main, database, table, particao, sc):
+    try:
+        logging.info("INICIANDO GRAVACAO DA SAIDA")
+        logging.info("SALVANDO SAIDA NA TABELA: {}".format(table))
+        write_hive(df_main, database, table, particao, sc)
+    except StandardError as erro:
+        logging.info(erro)
+        sys.exit(5)
+
+    logging.info("SAIDA SALVA")
+    return 0
+
+def write_hive(df_output, database, table, particao, sc):
+
+    HiveContext(sc).setConf("hive.exec.dynamic.partition.mode", "nonstrict")
+    SQLContext(sc).sql("set spark.sql.hive.convertMetastoreParquet = False")
+    SQLContext(sc).sql("set spark.sql.crossJoin.enabled = True")
+
+    # Cria tabela temporaria a partir do dataframe passado na funcao
+    logging.info('CRIANDO TABELA TEMPORARIA: temp_{}'.format(table))
+    df_output.registerTempTable("tmp_{}".format(table))
+
+    # Efetua a concatenacao de todas as colunas do dataframe pelo separador ', ', criando uma string para efetuar o select na tabela temporaria
+    campos = ', '.join(df_output.columns)
+
+    # dropa as colunas de particao da tabela
+    logging.info('DROPANDO COLUNAS UTILIZADAS COMO PARTICAO')
+    for column in particao:
+      df_output = df_output.drop(column)
+
+    # Efetua a concatenacao de todas as colunas do dataframe pelo separador ', '
+    particao = ', '.join(particao)
+
+    logging.info("MONTANDO A QUERY PARA REALIZAR INSERT NA TABELA: {}".format(table))
+    str_sql = "insert overwrite TABLE {}.{} partition( {} )".format(database, table, particao)
+
+    str_sql = "{} select {} from tmp_{}".format(str_sql, campos, table)
+
+    logging.info("EXECUTANDO O INSERT")
+    SQLContext(sc).sql(str_sql)
+
+    logging.info("REPARANDO AS PARTICOES DA TABELA")
+    SQLContext(sc).sql("Msck repair table {}.{}".format(database, table))
+
+    logging.info("LIMPANDO O CACHE")
+    SQLContext(sc).clearCache()
+    logging.info("LIMPEZA REALIZADA")
+
+    return
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+
+#Arquivo - Manipulation.py
+import sys
+sys.dont_write_bytecode=True
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
+from pyspark.sql.functions import col, expr, trim, lpad, lit
+import logging
+
+def cleam_value(df):
+    # Verifica campos nulos e com espaco no final ou no incio em todas as colunas do dataframe passado pela funcao
+    for value in df.columns:
+        df = df.withColumn(value, expr("IF({} is null, '', {})".format(value, value)))
+        df = df.withColumn(value, trim(col(value)))
+    return df
+
+def data_formater(date_in, date_format):
+    # Transforma o date_format em UPPERCASE
+    date_format = date_format.upper()
+
+    logging.info('ALTERANDO DATA PARA O FORMATO: {}'.format(date_format))
+    # tratamento de variavel para pegar ultimo dia do mes anterior
+    date_in = datetime.strptime(date_in, '%Y%m%d')
+
+    # Transforma dia da data passada em 1 e subtrai um dia, criando o ultimo dia corrido do mes anterior
+    date_in = date(date_in.year, date_in.month, 1) - relativedelta(days=1)
+
+    # Realiza a formatacao da data a partir do parametro passado pela funcao no campo date_format
+    if date_format == 'YYYYMMDD':
+        date_out = datetime.strftime(date_in, '%Y%m%d')
+    elif date_format == 'YYYYMM':
+        date_out = datetime.strftime(date_in, '%Y%m')
+    elif date_format == 'YYMMDD':
+        date_out = datetime.strftime(date_in, '%y%m%d')
+    elif date_format == 'YYMM':
+        date_out = datetime.strftime(date_in, '%y%m')
+    elif date_format == 'DDMMYYYY':
+        date_out = datetime.strftime(date_in, '%d%m%Y')
+    elif date_format == 'MMYYYY':
+        date_out = datetime.strftime(date_in, '%m%Y')
+    elif date_format == 'DDMMYY':
+        date_out = datetime.strftime(date_in, '%d%m%y')
+    elif date_format == 'MMYY':
+        date_out = datetime.strftime(date_in, '%m%y')
+    else:
+        logging.info('PARAMETRO INVALIDO: {}'.format(date_format))
+        sys.exit(7)
+
+    logging.info('DATA ALTERADA PARA {}'.format(date_format))
+    return date_out
+
+def lpad_func(df, col, leng):
+    df = df.withColumn(col, lpad(col,leng,'0'))
+    return df
+
+def joinner(df_f4, df_parm, keyf4, keyparm, join):
+    df_join = df_f4 \
+        .join(df_parm, col(keyf4) == col(keyparm), join)
+    return df_join
+
+# Parametros, df: dataframe que vai receber o valor | dic: Dicionario {'nome antigo':'nome novo'} 
+def renaming(df, dic):
+    for old_name, new_name in dic.items():
+        df = df.withColumnRenamed(old_name, new_name)
+    return df
+
+def data_formater_rateio(date_in, date_format):
+    logging.info('ALTERANDO DATA PARA O FORMATO: {}'.format(date_format))
+    # tratamento de variavel para pegar ultimo dia do mes anterior
+    date_in = datetime.strptime(date_in, '%Y%m%d')
+
+    # Realiza a formatacao da data a partir do parametro passado pela funcao no campo date_format
+    date_out = datetime.strftime(date_in, date_format)
+    
+    logging.info('DATA ALTERADA PARA {}'.format(date_out))
+    return date_out
+
+def data_formater_rateio_ant(date_in, date_format):
+    logging.info('ALTERANDO DATA PARA O FORMATO: {}'.format(date_format))
+    # tratamento de variavel para pegar ultimo dia do mes anterior
+    date_in = datetime.strptime(date_in, '%Y%m%d')
+
+    # Transforma dia da data passada em 1 e subtrai um dia, criando o ultimo dia corrido do mes anterior
+    date_in = date(date_in.year, date_in.month, 1) - relativedelta(days=1)
+
+    # Realiza a formatacao da data a partir do parametro passado pela funcao no campo date_format
+    date_out = datetime.strftime(date_in, date_format)
+    
+    logging.info('DATA ALTERADA PARA {}'.format(date_out))
+    return date_out
+
+
+#funcao que preenche campos para formar layout
+def fill_columns(spark, df, dbName, tableName):
+    table = spark.catalog.listColumns(tableName, dbName)
+    table_type = [[str(x[0]), str(x[2])] for x in table]
+    for item in table_type:
+        if item[1] != 'string':
+            print("DATA_TYPE: " + item[1])
+            if item[0] in df.columns:
+                print('TEM: ' + item[0] + ' do DATA_TYPE: ' + item[1])
+            else:
+                print('NAO TEM:' + item[0] + ' do DATA_TYPE: ' + item[1])
+                print('ADICIONANDO NO DF')
+                df = df.withColumn(item[0], lit(0))
+        else:
+            print("DATA_TYPE: " + item[1])
+            if item[0] in df.columns:
+                print('TEM: ' + item[0] + ' do DATA_TYPE: ' + item[1])
+            else:
+                print('NAO TEM:' + item[0] + ' do DATA_TYPE: ' + item[1])
+                print('ADICIONANDO NO DF')
+                df = df.withColumn(item[0], lit(""))
+    return df
+
+#funcao que salva df no hive
+def write_hive_table(spark, df, dbName, tableName, overwrite=True):
+    tableColumns = [list(x) for x in (spark.catalog.listColumns(tableName, dbName))]
+    orderedColumns = [x[0] for x in tableColumns]
+    dfWithSchemaOrdered = df.select(*orderedColumns)
+    dfWithSchemaOrdered.write.insertInto(dbName + "." + tableName, overwrite=overwrite)
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+###Pasta "param" (config / dataframes / linha_bp_ativos).json
+
+#Arquivo - config.json
+{
+    "path": {
+        "tb_contrato_bdr_altair": "/sistemas/ror/entrada/tb_contrato_bdr_altair",
+        "tb_contrato_nme_bdr": "/sistemas/ror/entrada/tb_contrato_nme_bdr",
+        "tb_contrato_nme_real": "/sistemas/ror/saida/tb_contrato_nme_real",
+        "tb_contrato_nme_ficticio": "/sistemas/ror/saida/tb_contrato_nme_ficticio",
+        "tb_contrato_rateio_final": "/sistemas/ror/saida/tb_contrato_rateio_final"
+    },
+    "tabelas": {
+        "get_altair": "tb_contrato_bdr_altair",
+        "cross_mis": "tb_contrato_nme_bdr",
+        "contrato_real": "tb_contrato_nme_real",
+        "contrato_ficticio": "tb_contrato_nme_ficticio",
+        "rateio_f1": "tb_contrato_rateio_f1",
+        "rateio_f2": "tb_contrato_rateio_f2",
+        "rateio_f3": "tb_contrato_rateio_f3",
+        "rateio_f4": "tb_contrato_rateio_f4",
+        "rorac_corp": "tb_contrato_rorac_corp",
+        "parametro_rateio": "tb_parametro_rateio",
+        "rateio_final": "tb_contrato_rateio_final",
+        "bdr_rorwa": "tb_contrato_bdr_rorwa",
+        "rorwa":"tb_contrato_rorwa"
+    },
+    "databases": {
+        "mis": "db_nme",
+        "bdr": "bma",
+        "rorac": "ror",
+        "roseta": "ros",
+        "smart_rorac": "smart_ror",
+        "smart_rosetta": "smart_ros"
+    },
+    "logging":{
+        "version": 1,
+        "disable_existing_loggers": false,
+        "formatters": {
+            "simple": {
+                "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            },
+            "complete": {
+                "format": "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
+            }
+        },
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "level": "INFO",
+                "formatter": "simple",
+                "stream": "ext://sys.stdout"
+            },
+            "debug_file_handler": {
+                "class": "logging.handlers.RotatingFileHandler",
+                "level": "DEBUG",
+                "formatter": "simple",
+                "filename": "debug.log",
+                "maxBytes": 10485760,
+                "backupCount": 20,
+                "encoding": "utf8"
+            },
+            "info_file_handler": {
+                "class": "logging.handlers.RotatingFileHandler",
+                "level": "INFO",
+                "formatter": "simple",
+                "filename": "info.log",
+                "maxBytes": 10485760,
+                "backupCount": 20,
+                "encoding": "utf8"
+            },
+            "error_file_handler": {
+                "class": "logging.handlers.RotatingFileHandler",
+                "level": "ERROR",
+                "formatter": "simple",
+                "filename": "errors.log",
+                "maxBytes": 10485760,
+                "backupCount": 20,
+                "encoding": "utf8"
+            }
+        },
+        "loggers": {
+            "my_module": {
+                "level": "ERROR",
+                "handlers": ["console"],
+                "propagate": "no"
+            }
+        },
+        "root": {
+            "level": "INFO",
+            "handlers": ["console", "info_file_handler", "error_file_handler", "debug_file_handler"]
+        }
+    }
+}
+
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#Arquivo - dataframes.json
+{
+    "dataframe": {
+        "df_f1_final":{
+            "colunas":
+            [
+                "CD_LINHA_BP_R",
+                "CONTRATO_R",
+                "VL_RESULT_TOTAL_R",
+                "PENUMPER_R",
+                "CD_CARTEIRA_PV_R",
+                "CD_SEGTO_R",
+                "DS_LINHA_BP_R",
+                "VL_SALDO_PONTA_R",
+                "CD_PROD_GEST_R",
+                "CD_DIM_AREA_NEG_R",
+                "CONTADOR",
+                "VL_TOTAL_SALDO",
+                "VL_TOTAL_RESULTADO",
+                "VL_RESULT_TOTAL_F",
+                "TIPO_RATEIO",
+                "SALDO_RESULTADO",
+                "CD_LN_ORI",
+                "CALCULO_ISS",
+                "CALCULO_PIS_COFINS",
+                "CALCULO_IR"
+            ]
+        },
+        "df_f1_ok":{
+            "colunas":
+            [
+                "CONTRATO_R",
+                "PENUMPER_R",
+                "CD_PROD_GEST_R",
+                "CD_SEGTO_R",
+                "CD_DIM_AREA_NEG_R",
+                "CD_LINHA_BP_R",
+                "DS_LINHA_BP_R",
+                "CD_CARTEIRA_PV_R",
+                "VL_SALDO_PONTA_R",
+                "VL_RESULT_TOTAL_R",
+                "VL_RESULT_RATEIO",
+                "VL_ISS_RESULTADO",
+                "VL_PIS_RESULTADO",
+                "VL_IR_RESULTADO",
+                "VL_ISS_RATEIO",
+                "VL_PIS_RATEIO",
+                "VL_IR_RATEIO",
+                "VL_MOB_F1"
+            ]
+        }
+    }
+}
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#Arquivo - linha_bp_ativos.json
+{
+    "CORP_ATIVO_PASSIVO": {
+        "Linhas_validas": [
+            "0111",
+            "0112",
+            "0113",
+            "0114",
+            "0115",
+            "0116",
+            "0117",
+            "0118",
+            "0119",
+            "0120",
+            "0121"
+        ]
+    },
+    "CORP_CAMPOS_RORWA": {
+        "Campos_validos": [
+            "CREDITOS",
+            "OUTRAS_MARGENS",
+            "ANTECIPACAO_DE_RECEBIVEIS_ADQUIRENCIA",
+            "DEMAIS_ATIVOS",
+            "COMISSOES",
+            "CAPTACOES",
+            "ACORDOS_VIGENTES",
+            "OVER_59",
+            "REMUNERACAO_PDD",
+            "REPARTO_MARGEM",
+            "EQUIVALENCIA",
+            "DIVIDENDOS",
+            "OUTROS_RESULTADOS_OPERACIONAIS"
+        ]
+    }
+}
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#Imports
+
+import sys
+reload(sys)
+sys.setdefaultencoding('utf-8')
+sys.dont_write_bytecode=True
+from in_out import source, get_spark
+from transformation import manipulation
+from pyspark.sql.functions import concat, col, lit, expr, trim, coalesce, lpad, sum as _sum, row_number, broadcast, count, upper, when
+from pyspark.sql.window import Window
+from pyspark.sql import SparkSession, Row
+import logging
+import logging.config
+logger = logging.getLogger()
+import argparse
+
+#Main + GetSpark()
+def main():    
+    #Criando variavel spark
+    spark = get_spark.Session('ROR - NME FASE 1').GetSpark()
+    spark.conf.set("spark.sql.join.preferSortMergeJoin", False)
+    spark.conf.set("hive.exec.parallel", True)
+    spark.conf.set("hive.exec.dynamic.partition","true")
+    spark.conf.set("hive.exec.dynamic.partition.mode","nonstrict") 
+
+#GetSpark()
+#cria variavel spark
+    spark = get_spark.Session('ROR - CTO RORWA HISTORICO').GetSpark()
+    spark.conf.set("spark.sql.join.preferSortMergeJoin", True)
+    spark.conf.set("hive.exec.parallel", True)
+
+#COALESCE
+    try:
+        partitions = int(spark.conf.get('spark.repartitions.coalesce'))
+    except:
+        partitions = 500
+
+#SEGEX.REPLACE
+    try:
+        segex = spark.conf.get('spark.segmento.exclude')
+    except:
+        segex = "TODOS_SEGMENTOS"
+    
+    segex = segex.replace("!","-").replace("_"," ").replace('"','').replace(', ',',')
+    segex_splited = segex.split(',') 
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+###Estrutura Corp
+
+#Imports
+import sys
+reload(sys)
+sys.setdefaultencoding('utf-8')
+sys.dont_write_bytecode=True
+from in_out import source, target
+from transformation import manipulation
+from pyspark.sql.functions import concat, col, lit, expr, trim, coalesce, lpad, sum as _sum, row_number, desc, split, when, size, length, substring, instr
+from pyspark.sql.window import *
+from pyspark.sql.types import StringType
+import logging
+import logging.config
+logger = logging.getLogger()
+import argparse
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
+from pyspark.sql import SparkSession
+
+#Write_Hive_Table
+def write_hive_table(spark, df, dbName, tableName, overwrite=False):
+    tableColumns = [list(x) for x in (spark.catalog.listColumns(tableName, dbName))]
+    orderedColumns = [x[0] for x in tableColumns]
+    dfWithSchemaOrdered = df.select(*orderedColumns)
+    dfWithSchemaOrdered.write.insertInto(dbName + "." + tableName, overwrite=overwrite)
+
+#SparkSession
+if __name__ == '__main__':
+
+    spark = SparkSession.builder \
+        .appName("[ROR] -> CROSS CORP") \
+        .enableHiveSupport() \
+        .config("spark.sql.hive.convertMetastoreParquet", "False") \
+        .config("spark.debug.maxToStringFields", "100") \
+        .config("spark.sql.crossJoin.enabled", "True") \
+        .config("spark.sql.hive.convertMetastoreParquet", "False") \
+        .config("hive.exec.dynamic.partition","true") \
+        .config("hive.exec.dynamic.partition.mode","nonstrict") \
+        .getOrCreate()
+
+#Parametros
+    # Recebe os parametros do json
+    param = source.read_json('config')
+
+    # Recebe os parametros do json com informacoes de dataframes
+    dataframes = source.read_json('dataframes')
+
+    # Efetua a leitura das linhas bps validas
+    linha_bp_ativos = source.read_json('linha_bp_ativos')
+
+    # Utiliza os parametros de login presentes no json
+    logging.config.dictConfig(param['logging'])
+
+    # Recebe os parametros passados pelo spark submit da shell ror_run_cross_corp.sh
+    parser = argparse.ArgumentParser(description = ' Processing')
+    parser.add_argument('--workflow', help= 'Nome do workflow', required=True)
+    parser.add_argument('--user', help= 'Usuario do servidor', required=True)
+    parser.add_argument('--database', help= 'DATABASE', required=True)
+    parser.add_argument('--database_smart', help= 'DATABASE_SMART', required=True)
+    parser.add_argument('--tb_altair_name', help= 'TB_ALTAIR', required=True)
+    parser.add_argument('--tb_nme_bdr_name', help= 'TB_NME_BDR', required=True)
+    parser.add_argument('--tb_parametro_name', help= 'TB_PARAMETRO', required=True)
+    parser.add_argument('--o_date', help= 'O_date de processamento', required=True)
+    args = parser.parse_args()
+
+    # Atribui as variaveis para o fluxo principal
+    logging.info('INICIANDO PROCESSO')
+    workflow = args.workflow
+    user = args.user
+    database = args.database
+    database_smart = args.database_smart
+    tb_altair_name = args.tb_altair_name
+    tb_nme_bdr_name = args.tb_nme_bdr_name
+    tb_parametro_name = args.tb_parametro_name
+    o_date = args.o_date
+
+#Data Manipulation
+    # Recebe a data de acordo com o formato desejado
+    data_mes = manipulation.data_formater(o_date, 'YYYYMM')
+    date_year = datetime.strptime(data_mes, '%Y%m')
+    date_year = date(date_year.year, date_year.month, 1) - relativedelta(years=1)
+    date_year = datetime.strftime(date_year, '%Y%m')
+    #data_rateio_ant = manipulation.data_formater_rateio_ant(o_date, '%Y-%m')
+
+    data_mes_ant = datetime.strptime(data_mes, '%Y%m')
+    data_mes_ant = date(data_mes_ant.year, data_mes_ant.month, 1) - relativedelta(months=1)
+    data_mes_ant = datetime.strftime(data_mes_ant, '%Y%m')
+
+    odate_mes = datetime.strptime(data_mes, '%Y%m')
+    odate_mes = datetime.strftime(odate_mes, '%m')
+
+    # Data utilizada para filtro referente as tabelas de ingestas
+    d_data_ingesta = datetime.strptime( o_date, '%Y%m%d' )
+    d_dat_ref_carga = datetime.strftime(d_data_ingesta, '%Y-%m')
+
+#Select Tabelas
+    # Efetua o select com a particao para criar dataframe df_altair
+    logging.info('INICIANDO LEITURA DA TABELA: {}'.format(tb_altair_name.upper()))
+    df_altair = spark.sql("select distinct ID_CONTRATO_BDR, ID_EMPRESA_BDR, ID_CLIENTE_BDR, VL_EAD_MMFF, FG_MMFF, TP_STAGE_PROVISAO, VL_PROVISAO, ID_RISK_UNIT, VL_SFBSFM, COD_VINCULA, FG_CARTERIZADA, DT_RENOV, DT_EXTR_DADOS_MIS, VL_MTM, VL_NOCIONAL as VL_NACIONAL from {}.{} where dt_ref = {}".format(database_smart, tb_altair_name, data_mes))
+    #df_altair.show(20,False)
+
+    # Efetua o select com a particao para criar dataframe df_nme_bdr
+    logging.info('INICIANDO LEITURA DA TABELA: {}'.format(tb_nme_bdr_name.upper()))
+    df_nme_bdr = spark.sql("select CONTRATO, DT_EXTRACAO, COD_BANCO, ID_CPF_CNPJ AS ID_CPF_CPNJ, PENUMPER, NM_CLIENTE, TP_PESSOA, CD_PRODUTO, CD_SUBPRODUTO, CD_PROD_GEST, CD_SEGTO, CD_DIM_AREA_NEG, DS_AREA_NEG_LOCAL, CD_LINHA_BP, CD_CRITERIO_AJUSTE, CD_CARTE_GESTOR, CD_AGENCIA, CD_CARTEIRA_PV, DT_FORMALIZACAO, DT_VENCIMENTO, VL_VOLUME_SALDO_MEDIO, VL_SALDO_PONTA, VL_RESULT_TOTAL, TX_CAPTACAO, VL_RESULT_REAL, CD_ESTADO_SALDO, ID_CONTRATO_BDR as ID_CONTRATO_BDR_MIS, FLAG_BDR from {}.{} where dt_ref = {}".format(database_smart, tb_nme_bdr_name, data_mes))
+    #df_nme_bdr.show(20,False)
+
+    # Efetua o select com a particao para criar dataframe df_parametro
+    df_parametro = spark.sql("select DISTINCT CD_LN_ORI, upper(COLUNA_RORWA) as COLUNA_RORWA from {}.{} where substring( dat_ref_carga, 1, 7) = '{}'".format(database, tb_parametro_name, d_dat_ref_carga))
+    #df_parametro.show(10,False)
+
+#Join entre tabelas
+    # Join entre o dataframe principal e o dataframe tb_CONTRATO_bdr_altair pelo ID_CONTRATO_BDR
+    logging.info('VERIFICANDO INTEGRIDADE ENTRE AS TABELAS {} E {}'.format(tb_altair_name.upper(), tb_nme_bdr_name.upper()))
+    df_main = df_nme_bdr.join(df_altair, df_nme_bdr['ID_CONTRATO_BDR_MIS'] == df_altair['ID_CONTRATO_BDR'], 'left')
+    #df_main.show(20,False)
+
+    df_parametro = df_parametro.withColumn('CD_LN_ORI', lpad('CD_LN_ORI',4,'0'))
+    df_main = df_main.withColumn('CD_LINHA_BP', lpad('CD_LINHA_BP',4,'0'))
+    # Join entre o dataframe principal e o dataframe tb_CONTRATO_bdr_altair pelo ID_CONTRATO_BDR
+    logging.info('EFETUANDO JOIN ENTRE DF_MAIN E DF_PARAMETRO')
+    df_linha_bp = df_main.join(df_parametro, df_main['CD_LINHA_BP'] == df_parametro['CD_LN_ORI'], 'left')
+    #df_linha_bp.show(20,False)
+
+#JOIN POR 2 CAMPOS (left_outer)
+    df_acumulado = df_main.join(df_corp_ant, (( df_margem.CONTRATO ==  df_corp_ant.CONTRATO_ANT ) &\
+    ( df_margem.CD_CARTE_CLIENTE ==  df_corp_ant.CD_CARTE_CLIENTE_ANT )),'left_outer' )
+
+#ALINHANDOS DF'S PARA SALVAR SAIDA
+    # Select nos campos do JSON df_altair para o df_main
+    logging.info('SELECIONANDO COLUNAS DO DATAFRAME FICTICIO')
+    df_fic = df_fic.select(dataframes["dataframe"]["df_corp"]["colunas"])
+    #df_fic.show(10,False)
+
+    # Select nos campos do JSON df_altair para o df_main
+    logging.info('SELECIONANDO COLUNAS DO DATAFRAME PRINCIPAL')
+    df_main = df_main.select(dataframes["dataframe"]["df_corp"]["colunas"])
+    #df_main.show(20,False)
+        
+    logging.info('UNION DOS REAIS COM OS FICTICIOS')
+    df_main = df_main.union(df_fic)
+    #df_main.show(30,False)
+
+    # Atribui a data (AAAAMM, ultimo dia corrido do mes anterior) de referencia com base no o_date passado pela malha
+    logging.info('CRIANDO COLUNA "dt_ref" COM O MES ANTERIOR')
+    
+    logging.info('Resultado Saida') 
+    df_main = df_main.select(dataframes['dataframe']['df_corp']['colunas'])
+    #df_main.show(30,False)
+
+    df_main = df_main.withColumn('dt_ref', lit(data_mes))
+    #df_main.show(20,False)
+
+    # Efetuando saida do processo 
+    #vrc = target.save_all(df_main, param['databases']['smart_rorac'], param['tabelas']['rorac_corp'], ['dt_ref'], spark)
+    write_hive_table(spark, df_main, database_smart, 'tb_contrato_rorac_corp', True)    
+    logging.info('Saida Salva')
+    spark.stop()
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#AGRUPAMENTO COM SUM / MAX
+
+lst_campos_validar = ['CONTRATO','CD_CARTE_CLIENTE','CD_LN_ORI','VL_RESULT_TOTAL','ID_CONTRATO_BDR_MIS','ID_CONTRATO_BDR','COLUNA_RORWA','MARGEM_MES','MARGEM_MES_ANT','RASTR_HIST_ANT','MARGEM_YTD']
+
+    df_reais.unpersist()
+    logging.info('CRIANDO DF_AGRUP_MAX')
+    df_agrup_max = df_reais
+    logging.info(df_agrup_max.columns)
+
+    fields_list = ['CONTRATO','CD_CARTE_CLIENTE','MARGEM_MES', 'VL_SDBSMV', 'VL_SFBSMV', 'VL_EAD_MMFF', 'VL_SDBSFM', 'VL_SFBSFM', 'IMPORTE', 'COMIS_FINANC', 'VL_ROF', 'VL_TTI', 'VL_MTM', 'VL_NACIONAL', 'VL_OREX', 'VL_PROVISAO']
+    df_agrup_sum = df_agrup_max.select(fields_list)
+
+    drop_list = ['MARGEM_MES', 'VL_SDBSMV', 'VL_SFBSMV', 'VL_EAD_MMFF', 'VL_SDBSFM', 'VL_SFBSFM', 'IMPORTE', 'COMIS_FINANC', 'VL_ROF', 'VL_TTI', 'VL_MTM', 'VL_NACIONAL', 'VL_OREX', 'VL_PROVISAO']
+    for name in drop_list:
+        df_agrup_max = df_agrup_max.drop(name)
+
+    # EFETUANDO A SOMA DOS CAMPOS DE VALOR DURANTE O AGRUPAMENTO
+    logging.info('EFETUANDO O AGRUPAMENTO E SOMANDO OS CAMPOS DE VALOR')
+    df_agrup_sum = df_agrup_sum.groupBy("CONTRATO", "CD_CARTE_CLIENTE").agg(
+        _sum('MARGEM_MES').alias('MARGEM_MES'),
+        _sum('VL_SDBSMV').alias('VL_SDBSMV'),
+        _sum('VL_SFBSMV').alias('VL_SFBSMV'),
+        _sum('VL_EAD_MMFF').alias('VL_EAD_MMFF'),
+        _sum('VL_SDBSFM').alias('VL_SDBSFM'),
+        _sum('VL_SFBSFM').alias('VL_SFBSFM'),
+        _sum('IMPORTE').alias('IMPORTE'),
+        _sum('COMIS_FINANC').alias('COMIS_FINANC'),
+        _sum('VL_ROF').alias('VL_ROF'),
+        _sum('VL_TTI').alias('VL_TTI'),
+        _sum('VL_MTM').alias('VL_MTM'),
+        _sum('VL_NACIONAL').alias('VL_NACIONAL'),
+        _sum('VL_OREX').alias('VL_OREX'),
+        _sum('VL_PROVISAO').alias('VL_PROVISAO') ).withColumnRenamed('CD_CARTE_CLIENTE','CD_CARTE_CLIENTE_SUM')
+    
+    # Selecionando as informacoes dos contratos que possuem maior VL_VOLUME_SALDO_MEDIO, VL_RESULT_TOTAL e VL_SALDO_PONTA
+    logging.info('SELECIONANDO CONTRATOS COM INFORMACOES QUE SERAO MANTIDAS DURANTE O AGRUPAMENTO')
+    df_agrup_max = df_agrup_max.withColumn('ID', row_number().over(Window.partitionBy( df_agrup_max.CONTRATO,\
+                                                                                        df_agrup_max.CD_CARTE_CLIENTE ).\
+                                                    orderBy(col('VL_VOLUME_SALDO_MEDIO').desc(),\
+                                                            col('VL_RESULT_TOTAL').desc(), col('VL_SALDO_PONTA').desc()))).\
+                                                            cache().filter('ID == 1').drop('ID').withColumnRenamed('CONTRATO', 'CONTRATO_MAX')
+
+    # Join entre os dataframes com os valores somados e obtidos atraves dos campos VL_VOLUME_SALDO_MEDIO, VL_RESULT_TOTAL e VL_SALDO_PONTA
+    logging.info('EFETUANDO JOIN ENTRE OS DATAFRAMES DE SUM E MAX')
+    df_main = df_agrup_max.join(df_agrup_sum, ((df_agrup_max.CONTRATO_MAX == df_agrup_sum.CONTRATO) & \
+                                                (df_agrup_max.CD_CARTE_CLIENTE == df_agrup_sum.CD_CARTE_CLIENTE_SUM)) ).drop('CONTRATO_MAX').drop('CD_CARTE_CLIENTE_SUM')
+    
+    logging.info('RETIRANDO DA MEMORIA DT_AGRUP_MAX E DF_AGRUP_SUM')
+    df_agrup_max.unpersist()
+    df_agrup_sum.unpersist()
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+# RASTR_HIST
+    logging.info('CRIANDO COLUNA RASTR_HIST')
+    df_rastr_hist = df_acumulado.withColumn('rastr_hist', coalesce( df_acumulado['rastr_hist_ant'], lit('') ) )
+    logging.info('TESTANDO RASTR_HIST')
+    df_rastr_hist2 = df_rastr_hist.withColumn('rastr_hist', concat(df_rastr_hist['rastr_hist'], concat((df_rastr_hist['MARGEM_MES']).cast(StringType()), lit('|'))))
+    logging.info('TESTANDO RASTR_HIST 2')
+
+    # Tratamento RASTR_HIST Acumulado e Margem_Hist
+    df_rastr_hist3 = df_rastr_hist2.withColumn('QTD_PIPES', size(split(col('rastr_hist'), r'\|')) - 1)
+    df_rastr_hist4 = df_rastr_hist3.withColumn('INSTR_RASTR_HIST', instr(col('rastr_hist'),'|') )
+
+    stringExpr = """CASE WHEN LENGTH(rastr_hist) = 0 then '0' \
+                                    WHEN LENGTH(regexp_replace(rastr_hist,'[^|]','')) >= 11 then \
+                            concat( substring( rastr_hist, instr_rastr_hist+1, length(rastr_hist)) ,'0|') \
+                            else \
+                            concat(rastr_hist,'0|') end """
+
+    df_rastr_hist5 = df_rastr_hist4.withColumn("rastr_hist", expr(stringExpr))
+
+    df_rastr_hist5 = df_rastr_hist5.withColumn("rastr_hist", when( (df_rastr_hist5.rastr_hist == '0'), lit('0|')).otherwise(df_rastr_hist5.rastr_hist) )
+
+    fields_list_drop = ['QTD_PIPES', 'INSTR_RASTR_HIST']
+
+    for i in range(12):
+        fields_list_drop.append('valor{}'.format(i+1))
+        df_rastr_hist5 = df_rastr_hist5.withColumn('valor{}'.format(i+1), \
+                            coalesce(split(df_rastr_hist5['rastr_hist'],'[\|]').getItem(i),lit(0) )  )
+
+    df_main = df_rastr_hist5.withColumn('valor1', when(trim(df_rastr_hist5.valor1) == '',lit(0)).otherwise(df_rastr_hist5.valor1) )
+    df_main = df_main.withColumn('valor2', when(trim(df_main.valor2) == '',lit(0)).otherwise(df_main.valor2) )
+    df_main = df_main.withColumn('valor3', when(trim(df_main.valor3) == '',lit(0)).otherwise(df_main.valor3) )
+    df_main = df_main.withColumn('valor4', when(trim(df_main.valor4) == '',lit(0)).otherwise(df_main.valor4) )
+    df_main = df_main.withColumn('valor5', when(trim(df_main.valor5) == '',lit(0)).otherwise(df_main.valor5) )
+    df_main = df_main.withColumn('valor6', when(trim(df_main.valor6) == '',lit(0)).otherwise(df_main.valor6) )
+    df_main = df_main.withColumn('valor7', when(trim(df_main.valor7) == '',lit(0)).otherwise(df_main.valor7) )
+    df_main = df_main.withColumn('valor8', when(trim(df_main.valor8) == '',lit(0)).otherwise(df_main.valor8) )
+    df_main = df_main.withColumn('valor9', when(trim(df_main.valor9) == '',lit(0)).otherwise(df_main.valor9) )
+    df_main = df_main.withColumn('valor10', when(trim(df_main.valor10) == '',lit(0)).otherwise(df_main.valor10) )
+    df_main = df_main.withColumn('valor11', when(trim(df_main.valor11) == '',lit(0)).otherwise(df_main.valor11) )
+    df_main = df_main.withColumn('valor12', when(trim(df_main.valor12) == '',lit(0)).otherwise(df_main.valor12) )
+
+    df_main = df_main.withColumn('MARGEM_HIST', col('valor1')  + col('valor2')  + col('valor3') + \
+                                                col('valor4')  + col('valor5')  + col('valor6') + \
+                                                col('valor7')  + col('valor8')  + col('valor9') + \
+                                                col('valor10') + col('valor11') + col('valor12') )
+
+    logging.info('Criando Campo Margem_Hist - Mostra de Valores Mensais de acordo com RASTR_HIST com margem mes anterior acumulado')
+    lst_campos_validar_hist = ['CONTRATO','CD_CARTE_CLIENTE','RASTR_HIST','MARGEM_HIST']+fields_list_drop
+    #df_main.select( lst_campos_validar_hist ).where( coalesce( df_acumulado.MARGEM_MES_ANT,lit(0) ) != 0 ).show(10,False)
+    df_main = df_main.drop(*fields_list_drop)
+    #df_main.show(20,False)
+    
+    df_fic = df_fic.withColumn('rastr_hist', lit('0|') )
+    df_fic = df_fic.withColumn('MARGEM_HIST', lit(0) )
+
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#UTLIZANDO JSON
+
+#CAMPOS VALIDOS
+    # MARGEM_MES
+    tipo_bp = linha_bp_ativos['CORP_CAMPOS_RORWA']["Campos_validos"]
+
+    # Monta a string com os campos validos
+    logging.info('MONTANDO QUERY COM CAMPOS VALIDOS PARA COLUNA_RORWA')
+    stringList = ""
+    for name in tipo_bp:
+        stringList += "'"+name+"', "
+
+    stringList = stringList[:len(stringList)-2]
+    stringList += ",'ROF'"
+
+    # Realizando query
+    logging.info('REALIZANDO QUERY PARA ATRIBUIR O VALOR VL_RESULT_TOTAL')
+    logging.info('CRIANDO COLUNA MARGEM_MES')
+    df_margem = df_flag_mora.withColumn('MARGEM_MES', expr("if(COLUNA_RORWA in ({}), nvl(VL_RESULT_TOTAL,0), 0)".format(stringList)))
+    #df_margem.select('CONTRATO','MARGEM_MES','COLUNA_RORWA','VL_RESULT_TOTAL').show(20,False)
+
+#LINHAS VALIDAS
+    # CD_CARTE_CLIENTE
+    logging.info('CRIANDO COLUNA CD_CARTE_CLIENTE')
+    list_validas = linha_bp_ativos['CORP_ATIVO_PASSIVO']["Linhas_validas"]
+
+    # Monta a string com os campos validos
+    logging.info('MONTANDO QUERY COM LINHAS BP VALIDAS')
+    stringLinhaValidas = ""
+    for i in list_validas:
+        stringLinhaValidas += "'"+i+"',"
+
+    stringLinhaValidas = stringLinhaValidas[:len(stringLinhaValidas)-1]
+
+    # Realizando query
+    logging.info('REALIZANDO QUERY PARA DEFINIR SE O CONTRATO E ATIVO (A) OU PASSIVO (P)')
+    df_margem = df_margem.withColumn('CD_CARTE_CLIENTE', expr("if(CD_LINHA_BP in ({}), 'A', 'P')".format(stringLinhaValidas)))
+    #df_margem.select('CONTRATO','CD_CARTE_CLIENTE','CD_LINHA_BP').show(20,False)
+
+
+#SELECIONANDO CAMPOS JSON
+
+# Select nos campos do JSON df_altair para o df_main
+logging.info('SELECIONANDO COLUNAS DO DATAFRAME FICTICIO')
+df_fic = df_fic.select(dataframes["dataframe"]["df_corp"]["colunas"])
+df_fic.show(10,False)
+
+# Select nos campos do JSON df_altair para o df_main
+logging.info('SELECIONANDO COLUNAS DO DATAFRAME PRINCIPAL')
+df_main = df_main.select(dataframes["dataframe"]["df_corp"]["colunas"])
+df_main.show(20,False)
+    
+logging.info('UNION DOS REAIS COM OS FICTICIOS')
+df_main = df_main.union(df_fic)
+df_main.show(30,False)
+
+logging.info('Resultado Saida') 
+df_main = df_main.select(dataframes['dataframe']['df_corp']['colunas'])
+df_main.show(30,False)
+
+df_main = df_main.withColumn('dt_ref', lit(data_mes))
+df_main.show(20,False)
+
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#CORP - SCRIPT
+
+# -*- coding: utf-8 -*-
+import sys
+reload(sys)
+sys.setdefaultencoding('utf-8')
+sys.dont_write_bytecode=True
+from in_out import source, target
+from transformation import manipulation
+from pyspark.sql.functions import concat, col, lit, expr, trim, coalesce, lpad, sum as _sum, row_number, desc, split, when, size, length, substring, instr
+from pyspark.sql.window import *
+from pyspark.sql.types import StringType
+import logging
+import logging.config
+logger = logging.getLogger()
+import argparse
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
+from pyspark.sql import SparkSession
+
+def write_hive_table(spark, df, dbName, tableName, overwrite=False):
+    tableColumns = [list(x) for x in (spark.catalog.listColumns(tableName, dbName))]
+    orderedColumns = [x[0] for x in tableColumns]
+    dfWithSchemaOrdered = df.select(*orderedColumns)
+    dfWithSchemaOrdered.write.insertInto(dbName + "." + tableName, overwrite=overwrite)
+
+if __name__ == '__main__':
+
+    spark = SparkSession.builder \
+        .appName("[ROR] -> CROSS CORP") \
+        .enableHiveSupport() \
+        .config("spark.sql.hive.convertMetastoreParquet", "False") \
+        .config("spark.debug.maxToStringFields", "100") \
+        .config("spark.sql.crossJoin.enabled", "True") \
+        .config("spark.sql.hive.convertMetastoreParquet", "False") \
+        .config("hive.exec.dynamic.partition","true") \
+        .config("hive.exec.dynamic.partition.mode","nonstrict") \
+        .getOrCreate()
+
+    # Recebe os parametros do json
+    param = source.read_json('config')
+
+    # Recebe os parametros do json com informacoes de dataframes
+    dataframes = source.read_json('dataframes')
+
+    # Efetua a leitura das linhas bps validas
+    linha_bp_ativos = source.read_json('linha_bp_ativos')
+
+    # Utiliza os parametros de login presentes no json
+    logging.config.dictConfig(param['logging'])
+
+    # Recebe os parametros passados pelo spark submit da shell ror_run_cross_corp.sh
+    parser = argparse.ArgumentParser(description = ' Processing')
+    parser.add_argument('--workflow', help= 'Nome do workflow', required=True)
+    parser.add_argument('--user', help= 'Usuario do servidor', required=True)
+    parser.add_argument('--database', help= 'DATABASE', required=True)
+    parser.add_argument('--database_smart', help= 'DATABASE_SMART', required=True)
+    parser.add_argument('--tb_altair_name', help= 'TB_ALTAIR', required=True)
+    parser.add_argument('--tb_nme_bdr_name', help= 'TB_NME_BDR', required=True)
+    parser.add_argument('--tb_parametro_name', help= 'TB_PARAMETRO', required=True)
+    parser.add_argument('--o_date', help= 'O_date de processamento', required=True)
+    args = parser.parse_args()
+
+    # Atribui as variaveis para o fluxo principal
+    logging.info('INICIANDO PROCESSO')
+    workflow = args.workflow
+    user = args.user
+    database = args.database
+    database_smart = args.database_smart
+    tb_altair_name = args.tb_altair_name
+    tb_nme_bdr_name = args.tb_nme_bdr_name
+    tb_parametro_name = args.tb_parametro_name
+    o_date = args.o_date
+
+    # Recebe a data de acordo com o formato desejado
+    data_mes = manipulation.data_formater(o_date, 'YYYYMM')
+    date_year = datetime.strptime(data_mes, '%Y%m')
+    date_year = date(date_year.year, date_year.month, 1) - relativedelta(years=1)
+    date_year = datetime.strftime(date_year, '%Y%m')
+
+    data_mes_ant = datetime.strptime(data_mes, '%Y%m')
+    data_mes_ant = date(data_mes_ant.year, data_mes_ant.month, 1) - relativedelta(months=1)
+    data_mes_ant = datetime.strftime(data_mes_ant, '%Y%m')
+
+    odate_mes = datetime.strptime(data_mes, '%Y%m')
+    odate_mes = datetime.strftime(odate_mes, '%m')
+
+    # Efetua o select com a particao para criar dataframe df_altair
+    logging.info('INICIANDO LEITURA DA TABELA: {}'.format(tb_altair_name.upper()))
+    df_altair = spark.sql("select distinct ID_CONTRATO_BDR, ID_EMPRESA_BDR, ID_CLIENTE_BDR, VL_EAD_MMFF, FG_MMFF, TP_STAGE_PROVISAO, VL_PROVISAO, ID_RISK_UNIT, VL_SFBSFM, COD_VINCULA, FG_CARTERIZADA, DT_RENOV, DT_EXTR_DADOS_MIS, VL_MTM, VL_NOCIONAL as VL_NACIONAL from {}.{} where dt_ref = {}".format(database_smart, tb_altair_name, data_mes))
+    #df_altair.show(20,False)
+
+    # Efetua o select com a particao para criar dataframe df_nme_bdr_name
+    logging.info('INICIANDO LEITURA DA TABELA: {}'.format(tb_nme_bdr_name.upper()))
+    df_nme_bdr = spark.sql("select CONTRATO, DT_EXTRACAO, COD_BANCO, ID_CPF_CNPJ AS ID_CPF_CPNJ, PENUMPER, NM_CLIENTE, TP_PESSOA, CD_PRODUTO, CD_SUBPRODUTO, CD_PROD_GEST, CD_SEGTO, CD_DIM_AREA_NEG, DS_AREA_NEG_LOCAL, CD_LINHA_BP, CD_CRITERIO_AJUSTE, CD_CARTE_GESTOR, CD_AGENCIA, CD_CARTEIRA_PV, DT_FORMALIZACAO, DT_VENCIMENTO, VL_VOLUME_SALDO_MEDIO, VL_SALDO_PONTA, VL_RESULT_TOTAL, TX_CAPTACAO, VL_RESULT_REAL, CD_ESTADO_SALDO, ID_CONTRATO_BDR as ID_CONTRATO_BDR_MIS, FLAG_BDR from {}.{} where dt_ref = {}".format(database_smart, tb_nme_bdr_name, data_mes))
+    #df_nme_bdr.show(20,False)
+
+    # Data utilizada para filtro referente as tabelas de ingestas
+    d_data_ingesta = datetime.strptime( o_date, '%Y%m%d' )
+    d_dat_ref_carga = datetime.strftime(d_data_ingesta, '%Y-%m')
+
+    # Efetua o select com a particao para criar dataframe df_tb_parametro
+    logging.info('INICIANDO LEITURA DA TABELA: {}'.format(tb_parametro_name))
+
+    df_parametro = spark.sql("select DISTINCT CD_LN_ORI, upper(COLUNA_RORWA) as COLUNA_RORWA from {}.{} where substring( dat_ref_carga, 1, 7) = '{}'".format(database, tb_parametro_name, d_dat_ref_carga))
+    #df_parametro.show(10,False)
+    
+    # Selecionando apenas contratos anteriores reais
+    df_corp_ant = spark.sql("select CONTRATO as CONTRATO_ANT, CD_CARTE_CLIENTE as CD_CARTE_CLIENTE_ANT, MARGEM_MES as MARGEM_MES_ANT, nvl(RASTR_HIST,'') as RASTR_HIST_ANT from {}.tb_contrato_rorac_corp as tb_cross_corp where dt_ref = {}".format(database_smart, data_mes_ant))
+    df_corp_ant = df_corp_ant.where("nvl(contrato,'') != ''  AND contrato != '-99100' AND LPAD(contrato,29,'0') != '00000000000000000000000000000' ")
+
+    # Verifica a integridade entre o dataframe principal e o dataframe tb_CONTRATO_bdr_altair pelo ID_CONTRATO_BDR
+    logging.info('VERIFICANDO INTEGRIDADE ENTRE AS TABELAS {} E {}'.format(tb_altair_name.upper(), tb_nme_bdr_name.upper()))
+    df_main = df_nme_bdr.join(df_altair, df_nme_bdr['ID_CONTRATO_BDR_MIS'] == df_altair['ID_CONTRATO_BDR'], 'left')
+    #df_main.show(20,False)
+
+    df_parametro = df_parametro.withColumn('CD_LN_ORI', lpad('CD_LN_ORI',4,'0'))
+    df_main = df_main.withColumn('CD_LINHA_BP', lpad('CD_LINHA_BP',4,'0'))
+
+    # Verifica a integridade entre o dataframe principal e o dataframe tb_CONTRATO_bdr_altair pelo ID_CONTRATO_BDR
+    logging.info('EFETUANDO JOIN ENTRE DF_MAIN E DF_PARAMETRO')
+    df_linha_bp = df_main.join(df_parametro, df_main['CD_LINHA_BP'] == df_parametro['CD_LN_ORI'], 'left')
+    #df_linha_bp.show(20,False)
+
+    rm_null_list = ['VL_EAD_MMFF', 'VL_PROVISAO', 'VL_MTM', 'VL_NACIONAL', 'VL_SFBSFM', 'ID_CONTRATO_BDR', 'ID_EMPRESA_BDR']
+
+    df_linha_coalesce = df_linha_bp
+    for name in rm_null_list:
+        df_linha_coalesce = df_linha_coalesce.withColumn(name, expr('if({} is null, 0, {})'.format(name, name)))
+
+    # FLAG_NOVA_PROD
+    logging.info('CRIANDO COLUNA FLAG_NOVA_PROD')
+    df_flag = df_linha_coalesce.withColumn('FLAG_NOVA_PROD', expr("if(DT_FORMALIZACAO > '{}', 1, 0)".format(date_year)))
+    #df_flag.select('CONTRATO','FLAG_NOVA_PROD','DT_FORMALIZACAO').show(20,False)
+
+    # FLAG_TP_REGISTRO
+    logging.info('CRIANDO COLUNA FLAG_TP_REGISTRO')
+    df_flag_registro = df_flag.withColumn('FLAG_TP_REGISTRO', expr('if(CONTRATO == "-99100", 2, 0)'))
+    #df_flag_registro.select('CONTRATO','FLAG_TP_REGISTRO').show(20,False)
+
+    # VL_SFBSMV
+    logging.info('CRIANDO COLUNA VL_SFBSMV')
+    df_sfbsmv = df_flag_registro.withColumn('VL_SFBSMV', expr('(nvl(VL_SFBSFM, 0)) * (nvl(VL_VOLUME_SALDO_MEDIO, 0)/(if(VL_SALDO_PONTA = 0, 1, nvl(VL_SALDO_PONTA, 1))))'))
+    #df_sfbsmv.select('CONTRATO','VL_SFBSMV','VL_VOLUME_SALDO_MEDIO','VL_SALDO_PONTA','VL_SALDO_PONTA').show(20,False)
+
+    # Altera a data do DT_VENCIMENTO
+    logging.info('CRIANDO COLUNA DT_VENCIMENTO')
+    df_vencimento = df_sfbsmv.withColumn('DT_VENCIMENTO', expr("IF((DT_VENCIMENTO is NULL OR trim(DT_VENCIMENTO) == '' OR trim(DT_VENCIMENTO) == 0), '01/01/9999', DT_VENCIMENTO)"))
+    #df_vencimento.select('CONTRATO','DT_VENCIMENTO').show(20,False)
+
+    # FLAG_MORA
+    logging.info('CRIANDO COLUNA FLAG_MORA')
+    df_flag_mora = df_vencimento.withColumn('FLAG_MORA', expr("""CASE
+                                                        WHEN LPAD(CD_ESTADO_SALDO,2,'0') == '01' OR LPAD(CD_ESTADO_SALDO,2,'0') == '02'
+                                                            THEN 0
+                                                        WHEN LPAD(CD_ESTADO_SALDO,2,'0') == '03' OR LPAD(CD_ESTADO_SALDO,2,'0') == '04'
+                                                            THEN 1
+                                                    END""")).withColumn('FLAG_MORA', coalesce(col('FLAG_MORA'), lit(0)))
+    #df_flag_mora.select('CONTRATO','FLAG_MORA','CD_ESTADO_SALDO').show(20,False)
+
+    # MARGEM_MES
+    tipo_bp = linha_bp_ativos['CORP_CAMPOS_RORWA']["Campos_validos"]
+
+    # Monta a string com os campos validos
+    logging.info('MONTANDO QUERY COM CAMPOS VALIDOS PARA COLUNA_RORWA')
+    stringList = ""
+    for name in tipo_bp:
+        stringList += "'"+name+"', "
+
+    stringList = stringList[:len(stringList)-2]
+    stringList += ",'ROF'"
+
+    # Realizando query
+    logging.info('REALIZANDO QUERY PARA ATRIBUIR O VALOR VL_RESULT_TOTAL')
+    logging.info('CRIANDO COLUNA MARGEM_MES')
+    df_margem = df_flag_mora.withColumn('MARGEM_MES', expr("if(COLUNA_RORWA in ({}), nvl(VL_RESULT_TOTAL,0), 0)".format(stringList)))
+    #df_margem.select('CONTRATO','MARGEM_MES','COLUNA_RORWA','VL_RESULT_TOTAL').show(20,False)
+
+    # CD_CARTE_CLIENTE
+    logging.info('CRIANDO COLUNA CD_CARTE_CLIENTE')
+    list_validas = linha_bp_ativos['CORP_ATIVO_PASSIVO']["Linhas_validas"]
+
+    # Monta a string com os campos validos
+    logging.info('MONTANDO QUERY COM LINHAS BP VALIDAS')
+    stringLinhaValidas = ""
+    for i in list_validas:
+        stringLinhaValidas += "'"+i+"',"
+
+    stringLinhaValidas = stringLinhaValidas[:len(stringLinhaValidas)-1]
+
+    # Realizando query
+    logging.info('REALIZANDO QUERY PARA DEFINIR SE O CONTRATO E ATIVO (A) OU PASSIVO (P)')
+    df_margem = df_margem.withColumn('CD_CARTE_CLIENTE', expr("if(CD_LINHA_BP in ({}), 'A', 'P')".format(stringLinhaValidas)))
+    #df_margem.select('CONTRATO','CD_CARTE_CLIENTE','CD_LINHA_BP').show(20,False)
+
+    # COMIS_FINANC
+    logging.info('CRIANDO COLUNA COMIS_FINANC')
+    df_margem = df_margem.withColumn('COMIS_FINANC', expr("if(COLUNA_RORWA == 'COMISSOES', nvl(VL_RESULT_TOTAL,0) , 0)"))
+    #df_margem.select('CONTRATO','COMIS_FINANC','COLUNA_RORWA','VL_RESULT_TOTAL').show(20,False)
+
+    # COD_VINCULA
+    logging.info('CRIANDO COLUNA COD_VINCULA')
+    df_main = df_margem.withColumn('COD_VINCULA', lit('0'))
+    #df_main.select('CONTRATO','COD_VINCULA').show(20,False)
+
+    # VL_ROF
+    logging.info('CRIANDO COLUNA VL_ROF')
+    df_main = df_main.withColumn('VL_ROF', expr("if(COLUNA_RORWA == 'ROF', VL_RESULT_TOTAL, 0)"))
+    #df_main.select('CONTRATO','VL_ROF','COLUNA_RORWA','VL_RESULT_TOTAL').show(20,False)
+
+    # VL_OREX
+    logging.info('CRIANDO COLUNA VL_OREX')
+    df_main = df_main.withColumn('VL_OREX', expr("if(COLUNA_RORWA == 'OUTROS_RESULTADOS_OPERACIONAIS', VL_RESULT_TOTAL, 0)"))
+    #df_main.select('CONTRATO','VL_OREX','COLUNA_RORWA').show(20,False)
+    
+    # DT_RENOVACAO
+    logging.info('CRIANDO COLUNA DT_RENOVACAO')
+    df_main = df_main.withColumn('DT_RENOVACAO',col('DT_RENOV').substr(1,10))
+    #df_main.select('CONTRATO','DT_RENOVACAO').show(20,False)
+    
+    # FLAG_CARTERIZADAS
+    logging.info('CRIANDO COLUNA FLAG_CARTERIZADAS')
+    df_main = df_main.withColumn('FLAG_CARTERIZADAS', col('FG_CARTERIZADA'))
+    #df_main.select('CONTRATO','FLAG_CARTERIZADAS').show(20,False)
+
+    # ID_PROD_OPER
+    logging.info('CRIANDO COLUNA ID_PROD_OPER')
+    df_main = df_main.withColumn('ID_PROD_OPER', col('CD_PRODUTO'))
+    #df_main.select('CONTRATO','ID_PROD_OPER').show(20,False)
+
+    # CD_SEGTO_CLI_MIS
+    logging.info('CRIANDO COLUNA CD_SEGTO_CLI_MIS')
+    df_main = df_main.withColumn('CD_SEGTO_CLI_MIS', col('CD_SEGTO'))
+    #df_main.select('CONTRATO','CD_SEGTO_CLI_MIS').show(20,False)
+
+    # DT_EXTRACAO_DADOS_MIS
+    logging.info('CRIANDO COLUNA DT_EXTRACAO_DADOS_MIS')
+    df_main = df_main.withColumn('DT_EXTRACAO_DADOS_MIS', col('DT_EXTRACAO'))
+    #df_main.select('CONTRATO','DT_EXTRACAO_DADOS_MIS').show(20,False)
+
+    # VL_SDBSMV
+    logging.info('CRIANDO COLUNA VL_SDBSMV')
+    df_main = df_main.withColumn('VL_SDBSMV', col('VL_VOLUME_SALDO_MEDIO'))
+    #df_main.select('CONTRATO','VL_SDBSMV').show(20,False)
+
+    # FLAG_INTERNEGOCIO
+    logging.info('CRIANDO COLUNA FLAG_INTERNEGOCIO')
+    df_main = df_main.withColumn('FLAG_INTERNEGOCIO', col('CD_CRITERIO_AJUSTE'))
+    #df_main.select('CONTRATO','FLAG_INTERNEGOCIO').show(20,False)
+
+    # VL_SDBSFM
+    logging.info('CRIANDO COLUNA VL_SDBSFM')
+    df_main = df_main.withColumn('VL_SDBSFM', col('VL_SALDO_PONTA'))
+    #df_main.select('CONTRATO','VL_SDBSFM').show(20,False)
+
+    # VL_TTI
+    logging.info('CRIANDO COLUNA VL_TTI')
+    df_main = df_main.withColumn('VL_TTI', col('TX_CAPTACAO'))
+    #df_main.select('CONTRATO','VL_TTI').show(20,False)
+    
+    # IMPORTE
+    logging.info('CRIANDO COLUNA IMPORTE')
+    df_main = df_main.withColumn('IMPORTE', expr("if(COLUNA_RORWA in ('CREDITOS','CAPTACOES'), VL_RESULT_TOTAL, 0)"))
+    #df_main.select('CONTRATO','IMPORTE','VL_RESULT_REAL').show(20,False)
+
+    # VERSAO_MIS
+    logging.info('CRIANDO COLUNA VERSAO_MIS')
+    df_main = df_main.withColumn('VERSAO_MIS', lit('0'))
+    #df_main.select('CONTRATO','VERSAO_MIS').show(20,False)
+    
+    # COMIS_NAO_FINANC
+    logging.info('CRIANDO COLUNA COMIS_NAO_FINANC')
+    df_main = df_main.withColumn('COMIS_NAO_FINANC', lit('0'))
+    #df_main.select('CONTRATO','COMIS_NAO_FINANC').show(20,False)
+    
+    # FINALIDADE_DADOS
+    logging.info('CRIANDO COLUNA FINALIDADE_DADOS')
+    df_main = df_main.withColumn('FINALIDADE_DADOS', lit('1'))
+    #df_main.select('CONTRATO','FINALIDADE_DADOS').show(20,False)
+    
+    # DIVISA
+    logging.info('CRIANDO COLUNA DIVISA')
+    df_main = df_main.withColumn('DIVISA', lit('BRL'))
+    #df_main.select('CONTRATO','DIVISA').show(20,False)
+    
+    # PORC_ERROS
+    logging.info('CRIANDO COLUNA PORC_ERROS')
+    df_main = df_main.withColumn('PORC_ERROS', lit('0'))
+    #df_main.select('CONTRATO','PORC_ERROS').show(20,False)
+    
+    # TERRITORIAL
+    logging.info('CRIANDO COLUNA TERRITORIAL')
+    df_main = df_main.withColumn('TERRITORIAL', lit('0'))
+    #df_main.select('CONTRATO','TERRITORIAL').show(20,False)
+
+    #df_main.show(10,False)
+
+    # COD_DIV_MIS
+    logging.info('CRIANDO COLUNA COD_DIV_MIS')
+    df_main = df_main.withColumn('COD_DIV_MIS', lit('BRL'))
+    #df_main.select('CONTRATO','COD_DIV_MIS').show(20,False)
+
+    # INTRAGRUPO
+    logging.info('CRIANDO COLUNA INTRAGRUPO')
+    df_main = df_main.withColumn('INTRAGRUPO', lit('0'))
+    
+    # Separando os Ficticios
+    logging.info('CRIANDO DF_FIC')
+    logging.info('SELECIONANDO CONTRATOS FICTICIOS')
+    df_fic = df_main.where("nvl(contrato,'') = ''   OR contrato = '-99100' OR LPAD(contrato,29,'0') = '00000000000000000000000000000' ")
+    #df_fic.show(10,False)
+
+    # Separando apenas os reais
+    logging.info('SELECIONANDO CONTRATOS REAIS')
+    df_reais = df_main.where("nvl(contrato,'') != ''  AND contrato != '-99100' AND LPAD(contrato,29,'0') != '00000000000000000000000000000' ")
+    #df_reais.show(10,False)
+
+    lst_campos_validar = ['CONTRATO','CD_CARTE_CLIENTE','CD_LN_ORI','VL_RESULT_TOTAL','ID_CONTRATO_BDR_MIS','ID_CONTRATO_BDR','COLUNA_RORWA','MARGEM_MES','MARGEM_MES_ANT','RASTR_HIST_ANT','MARGEM_YTD']
+
+    df_reais.unpersist()
+    logging.info('CRIANDO DF_AGRUP_MAX')
+    df_agrup_max = df_reais
+    logging.info(df_agrup_max.columns)
+
+    fields_list = ['CONTRATO','CD_CARTE_CLIENTE','MARGEM_MES', 'VL_SDBSMV', 'VL_SFBSMV', 'VL_EAD_MMFF', 'VL_SDBSFM', 'VL_SFBSFM', 'IMPORTE', 'COMIS_FINANC', 'VL_ROF', 'VL_TTI', 'VL_MTM', 'VL_NACIONAL', 'VL_OREX', 'VL_PROVISAO']
+    df_agrup_sum = df_agrup_max.select(fields_list)
+
+    drop_list = ['MARGEM_MES', 'VL_SDBSMV', 'VL_SFBSMV', 'VL_EAD_MMFF', 'VL_SDBSFM', 'VL_SFBSFM', 'IMPORTE', 'COMIS_FINANC', 'VL_ROF', 'VL_TTI', 'VL_MTM', 'VL_NACIONAL', 'VL_OREX', 'VL_PROVISAO']
+    for name in drop_list:
+        df_agrup_max = df_agrup_max.drop(name)
+
+    # EFETUANDO A SOMA DOS CAMPOS DE VALOR DURANTE O AGRUPAMENTO
+    logging.info('EFETUANDO O AGRUPAMENTO E SOMANDO OS CAMPOS DE VALOR')
+    df_agrup_sum = df_agrup_sum.groupBy("CONTRATO", "CD_CARTE_CLIENTE").agg(
+        _sum('MARGEM_MES').alias('MARGEM_MES'),
+        _sum('VL_SDBSMV').alias('VL_SDBSMV'),
+        _sum('VL_SFBSMV').alias('VL_SFBSMV'),
+        _sum('VL_EAD_MMFF').alias('VL_EAD_MMFF'),
+        _sum('VL_SDBSFM').alias('VL_SDBSFM'),
+        _sum('VL_SFBSFM').alias('VL_SFBSFM'),
+        _sum('IMPORTE').alias('IMPORTE'),
+        _sum('COMIS_FINANC').alias('COMIS_FINANC'),
+        _sum('VL_ROF').alias('VL_ROF'),
+        _sum('VL_TTI').alias('VL_TTI'),
+        _sum('VL_MTM').alias('VL_MTM'),
+        _sum('VL_NACIONAL').alias('VL_NACIONAL'),
+        _sum('VL_OREX').alias('VL_OREX'),
+        _sum('VL_PROVISAO').alias('VL_PROVISAO') ).withColumnRenamed('CD_CARTE_CLIENTE','CD_CARTE_CLIENTE_SUM')
+    
+    # Selecionando as informacoes dos contratos que possuem maior VL_VOLUME_SALDO_MEDIO, VL_RESULT_TOTAL e VL_SALDO_PONTA
+    logging.info('SELECIONANDO CONTRATOS COM INFORMACOES QUE SERAO MANTIDAS DURANTE O AGRUPAMENTO')
+    df_agrup_max = df_agrup_max.withColumn('ID', row_number().over(Window.partitionBy( df_agrup_max.CONTRATO,\
+                                                                                        df_agrup_max.CD_CARTE_CLIENTE ).\
+                                                    orderBy(col('VL_VOLUME_SALDO_MEDIO').desc(),\
+                                                            col('VL_RESULT_TOTAL').desc(), col('VL_SALDO_PONTA').desc()))).\
+                                                            cache().filter('ID == 1').drop('ID').withColumnRenamed('CONTRATO', 'CONTRATO_MAX')
+
+
+    # Join entre os dataframes com os valores somados e obtidos atraves dos campos VL_VOLUME_SALDO_MEDIO, VL_RESULT_TOTAL e VL_SALDO_PONTA
+    logging.info('EFETUANDO JOIN ENTRE OS DATAFRAMES DE SUM E MAX')
+    df_main = df_agrup_max.join(df_agrup_sum, ((df_agrup_max.CONTRATO_MAX == df_agrup_sum.CONTRATO) & \
+                                                (df_agrup_max.CD_CARTE_CLIENTE == df_agrup_sum.CD_CARTE_CLIENTE_SUM)) ).drop('CONTRATO_MAX').drop('CD_CARTE_CLIENTE_SUM')
+    
+
+
+    logging.info('RETIRANDO DA MEMORIA DT_AGRUP_MAX E DF_AGRUP_SUM')
+    df_agrup_max.unpersist()
+    df_agrup_sum.unpersist()
+
+    ######################################## POS AGRUPAMENTO
+    logging.info('CALCULO DE MARGEM_YTD') 
+
+    # Margem YTD
+    df_acumulado = df_main.join(df_corp_ant, (( df_margem.CONTRATO ==  df_corp_ant.CONTRATO_ANT ) &\
+    ( df_margem.CD_CARTE_CLIENTE ==  df_corp_ant.CD_CARTE_CLIENTE_ANT )),'left_outer' )
+
+    if odate_mes == '01':
+        df_acumulado = df_acumulado.withColumn('MARGEM_YTD', coalesce(col('MARGEM_MES'),lit(0)) )
+    else:
+        ## Acumulado se nao for Janeiro
+        df_acumulado = df_acumulado.withColumn('MARGEM_YTD',  coalesce( df_acumulado.MARGEM_MES, lit(0) ) + coalesce( df_acumulado.MARGEM_MES_ANT, lit(0) ) )
+
+    
+    logging.info('RESULTADO DE MARGEM_YTD PERIODO MES : {}'.format(odate_mes) ) 
+    #df_acumulado.select('CONTRATO','MARGEM_YTD','MARGEM_MES','MARGEM_MES_ANT').show(100,False)
+
+    # Incluindo campo nos ficticios Margem_YTD
+    logging.info('CRIANDO CAMPO MARGEM_YTD em Ficticio - DF_FIC')
+    df_fic = df_fic.withColumn('MARGEM_YTD', coalesce(col('MARGEM_MES'),lit(0)) )
+    
+    logging.info('LINHAS BP ATIVO {} '.format(stringLinhaValidas) )
+    
+    
+    ######################################## FIM POS AGRUPAMENTO
+
+    # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #  POS AGRUPAMENTO ROTINA DE RASTR_HIST 
+    # RASTR_HIST
+    logging.info('CRIANDO COLUNA RASTR_HIST')
+    df_rastr_hist = df_acumulado.withColumn('rastr_hist', coalesce( df_acumulado['rastr_hist_ant'], lit('') ) )
+    logging.info('TESTANDO RASTR_HIST')
+    df_rastr_hist2 = df_rastr_hist.withColumn('rastr_hist', concat(df_rastr_hist['rastr_hist'], concat((df_rastr_hist['MARGEM_MES']).cast(StringType()), lit('|'))))
+    logging.info('TESTANDO RASTR_HIST 2')
+
+    # Tratamento RASTR_HIST Acumulado e Margem_Hist
+    df_rastr_hist3 = df_rastr_hist2.withColumn('QTD_PIPES', size(split(col('rastr_hist'), r'\|')) - 1)
+    df_rastr_hist4 = df_rastr_hist3.withColumn('INSTR_RASTR_HIST', instr(col('rastr_hist'),'|') )
+
+    stringExpr = """CASE WHEN LENGTH(rastr_hist) = 0 then '0' \
+                                    WHEN LENGTH(regexp_replace(rastr_hist,'[^|]','')) >= 11 then \
+                            concat( substring( rastr_hist, instr_rastr_hist+1, length(rastr_hist)) ,'0|') \
+                            else \
+                            concat(rastr_hist,'0|') end """
+
+    df_rastr_hist5 = df_rastr_hist4.withColumn("rastr_hist", expr(stringExpr))
+
+    df_rastr_hist5 = df_rastr_hist5.withColumn("rastr_hist", when( (df_rastr_hist5.rastr_hist == '0'), lit('0|')).otherwise(df_rastr_hist5.rastr_hist) )
+
+    fields_list_drop = ['QTD_PIPES', 'INSTR_RASTR_HIST']
+
+    for i in range(12):
+        fields_list_drop.append('valor{}'.format(i+1))
+        df_rastr_hist5 = df_rastr_hist5.withColumn('valor{}'.format(i+1), \
+                            coalesce(split(df_rastr_hist5['rastr_hist'],'[\|]').getItem(i),lit(0) )  )
+
+    df_main = df_rastr_hist5.withColumn('valor1', when(trim(df_rastr_hist5.valor1) == '',lit(0)).otherwise(df_rastr_hist5.valor1) )
+    df_main = df_main.withColumn('valor2', when(trim(df_main.valor2) == '',lit(0)).otherwise(df_main.valor2) )
+    df_main = df_main.withColumn('valor3', when(trim(df_main.valor3) == '',lit(0)).otherwise(df_main.valor3) )
+    df_main = df_main.withColumn('valor4', when(trim(df_main.valor4) == '',lit(0)).otherwise(df_main.valor4) )
+    df_main = df_main.withColumn('valor5', when(trim(df_main.valor5) == '',lit(0)).otherwise(df_main.valor5) )
+    df_main = df_main.withColumn('valor6', when(trim(df_main.valor6) == '',lit(0)).otherwise(df_main.valor6) )
+    df_main = df_main.withColumn('valor7', when(trim(df_main.valor7) == '',lit(0)).otherwise(df_main.valor7) )
+    df_main = df_main.withColumn('valor8', when(trim(df_main.valor8) == '',lit(0)).otherwise(df_main.valor8) )
+    df_main = df_main.withColumn('valor9', when(trim(df_main.valor9) == '',lit(0)).otherwise(df_main.valor9) )
+    df_main = df_main.withColumn('valor10', when(trim(df_main.valor10) == '',lit(0)).otherwise(df_main.valor10) )
+    df_main = df_main.withColumn('valor11', when(trim(df_main.valor11) == '',lit(0)).otherwise(df_main.valor11) )
+    df_main = df_main.withColumn('valor12', when(trim(df_main.valor12) == '',lit(0)).otherwise(df_main.valor12) )
+
+    df_main = df_main.withColumn('MARGEM_HIST', col('valor1')  + col('valor2')  + col('valor3') + \
+                                                col('valor4')  + col('valor5')  + col('valor6') + \
+                                                col('valor7')  + col('valor8')  + col('valor9') + \
+                                                col('valor10') + col('valor11') + col('valor12') )
+
+    logging.info('Criando Campo Margem_Hist - Mostra de Valores Mensais de acordo com RASTR_HIST com margem mes anterior acumulado')
+    lst_campos_validar_hist = ['CONTRATO','CD_CARTE_CLIENTE','RASTR_HIST','MARGEM_HIST']+fields_list_drop
+    #df_main.select( lst_campos_validar_hist ).where( coalesce( df_acumulado.MARGEM_MES_ANT,lit(0) ) != 0 ).show(10,False)
+    df_main = df_main.drop(*fields_list_drop)
+    #df_main.show(20,False)
+    
+    df_fic = df_fic.withColumn('rastr_hist', lit('0|') )
+    df_fic = df_fic.withColumn('MARGEM_HIST', lit(0) )
+   
+
+    # Select nos campos do JSON df_altair para o df_main
+    logging.info('SELECIONANDO COLUNAS DO DATAFRAME FICTICIO')
+    df_fic = df_fic.select(dataframes["dataframe"]["df_corp"]["colunas"])
+    #df_fic.show(10,False)
+
+    # Select nos campos do JSON df_altair para o df_main
+    logging.info('SELECIONANDO COLUNAS DO DATAFRAME PRINCIPAL')
+    df_main = df_main.select(dataframes["dataframe"]["df_corp"]["colunas"])
+    #df_main.show(20,False)
+        
+    logging.info('UNION DOS REAIS COM OS FICTICIOS')
+    df_main = df_main.union(df_fic)
+    #df_main.show(30,False)
+
+    # Atribui a data (AAAAMM, ultimo dia corrido do mes anterior) de referencia com base no o_date passado pela malha
+    logging.info('CRIANDO COLUNA "dt_ref" COM O MES ANTERIOR')
+    
+    logging.info('Resultado Saida') 
+    df_main = df_main.select(dataframes['dataframe']['df_corp']['colunas'])
+    #df_main.show(30,False)
+
+    df_main = df_main.withColumn('dt_ref', lit(data_mes))
+    #df_main.show(20,False)
+
+    # Efetuando saida do processo 
+    #vrc = target.save_all(df_main, param['databases']['smart_rorac'], param['tabelas']['rorac_corp'], ['dt_ref'], spark)
+    write_hive_table(spark, df_main, database_smart, 'tb_contrato_rorac_corp', True)    
+    logging.info('Saida Salva')
+    spark.stop()
+
+
+#CORP - CURA
+
+# -*- coding: utf-8 -*-
+import sys
+reload(sys)
+sys.setdefaultencoding('utf-8')
+sys.dont_write_bytecode=True
+from in_out import source, target
+from transformation import manipulation
+from pyspark.sql.functions import concat, col, lit, expr, trim, coalesce, lpad, sum as _sum, row_number, split, when, size, length, substring, instr
+from pyspark.sql.window import *
+from pyspark.sql.types import StringType, IntegerType
+from pyspark.sql import SQLContext, SparkSession, HiveContext
+from pyspark import SparkContext, SparkConf
+import logging
+import logging.config
+logger = logging.getLogger()
+import argparse
+
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
+
+def write_hive_table(spark, df, dbName, tableName, overwrite=False):
+    tableColumns = [list(x) for x in (spark.catalog.listColumns(tableName, dbName))]
+    orderedColumns = [x[0] for x in tableColumns]
+    dfWithSchemaOrdered = df.select(*orderedColumns)
+    
+    dfWithSchemaOrdered.show(10,False)
+    dfWithSchemaOrdered.write.insertInto(dbName + "." + tableName, overwrite=overwrite)
+
+if __name__ == '__main__':
+
+    # Atribui os parametros passados pela shell
+    parser = argparse.ArgumentParser(description = 'Processing')
+    parser.add_argument('--workflow', help= 'Nome do workflow', required=True)
+    parser.add_argument('--user', help= 'Usuario do servidor', required=True)
+    parser.add_argument('--database_smart', help= 'database das tabelas smart utilizadas no processo', required=True)
+    parser.add_argument('--tb_contrato_rorac_corp', help= 'tabela tb_contrato_rorac_corp', required=True)
+    parser.add_argument('--o_date', help= 'O_date de processamento', required=True)
+    args = parser.parse_args()
+    
+    # Atribui as variaveis 
+    workflow = args.workflow
+    user = args.user
+    database_smart = args.database_smart
+    str_tabela_corp = args.tb_contrato_rorac_corp
+    o_date = args.o_date
+
+    spark = SparkSession.builder \
+        .appName("[ROR] -> CROSS CORP CURA") \
+        .enableHiveSupport() \
+        .config("spark.sql.hive.convertMetastoreParquet", "False") \
+        .config("spark.debug.maxToStringFields", "100") \
+        .config("spark.sql.crossJoin.enabled", "True") \
+        .config("spark.sql.hive.convertMetastoreParquet", "False") \
+        .config("hive.exec.dynamic.partition","true") \
+        .config("hive.exec.dynamic.partition.mode","nonstrict") \
+        .getOrCreate()
+
+    ## Apenas de testes
+    #workflow = ''
+    #user = 'ror_bdata_h'
+    #database_smart = 'smart_ror'
+    #str_tabela_corp = 'tb_contrato_rorac_corp'
+    #o_date = '201901'
+
+    #o_date = '20190210'
+    #print 'parametro - {}'.format(o_date)
+    #d_date = datetime.strptime(o_date, '%Y%m%d')
+    #str_odate = date(d_date.year, d_date.month,1) - relativedelta(days=1)
+    #str_data_mes = datetime.strftime(str_odate, '%Y%m')
+    #print str_data_mes
+
+    #d_date_ant =  d_date - relativedelta(months=2)
+    #str_data_mes_ant = datetime.strftime(d_date_ant, '%Y%m')
+    #print str_data_mes_ant
+       
+    # Efetua a leitura dos parametros de log
+    param = source.read_json('config')
+
+    # Efetua a leitura parametros do json com informacoes de dataframes
+    dataframes = source.read_json('dataframes')
+
+    # Utiliza os parametros de login presentes no json
+    logging.config.dictConfig(param['logging'])
+        
+    # Recebe a data de acordo com o formato desejado retornando mês anterior somente do ODATE 
+    str_data_mes = manipulation.data_formater(o_date, 'YYYYMM')
+    logging.info("Data Odate - {}".format(str_data_mes) )
+
+    # Retornar ODATE - MÊS ANTERIOR
+    d_date = datetime.strptime(o_date, '%Y%m%d')
+
+    d_date_ant =  d_date - relativedelta(months=2)
+    str_data_mes_ant = datetime.strftime(d_date_ant, '%Y%m')
+    logging.info("Data Odate Anterior - {}".format(str_data_mes_ant) )
+
+
+    ##teste
+#    o_date = '20190910'
+#    print 'parametro - {}'.format(o_date)
+#    d_date = datetime.strptime(o_date, '%Y%m%d')
+#    str_odate = date(d_date.year, d_date.month,1) - relativedelta(days=1)
+#    str_data_mes_ant = datetime.strftime(str_odate, '%Y%m')
+#    print str_data_mes_ant
+
+#    d_date_ant =  d_date - relativedelta(months=2)
+#    str_data_mes_ant = datetime.strftime(d_date_ant, '%Y%m')
+#    print str_data_mes_ant
+
+
+    # Efetua o select com a particao para criar dataframe df_tb_corp
+    logging.info('INICIANDO LEITURA DA TABELA: {}'.format(str_tabela_corp))
+    
+    stringSQL = "select cod_banco,"
+    stringSQL += "dt_extracao,"
+    stringSQL += "finalidade_dados,"
+    stringSQL += "contrato,"
+    stringSQL += "cd_dim_area_neg,"
+    stringSQL += "divisa,"
+    stringSQL += "porc_erros,"
+    stringSQL += "cd_segto,"
+    stringSQL += "cd_subproduto,"
+    stringSQL += "id_risk_unit,"
+    stringSQL += "penumper,"
+    stringSQL += "id_empresa_bdr,"
+    stringSQL += "id_cliente_bdr,"
+    stringSQL += "margem_mes,"
+    stringSQL += "margem_ytd,"
+    stringSQL += "margem_hist,"
+    stringSQL += "vl_sdbsmv,"
+    stringSQL += "vl_sfbsmv,"
+    stringSQL += "vl_ead_mmff,"
+    stringSQL += "fg_mmff,"
+    stringSQL += "dt_formalizacao,"
+    stringSQL += "dt_vencimento,"
+    stringSQL += "cd_agencia,"
+    stringSQL += "cd_carteira_pv,"
+    stringSQL += "territorial,"
+    stringSQL += "cd_carte_gestor,"
+    stringSQL += "cd_carte_cliente,"
+    stringSQL += "id_contrato_bdr,"
+    stringSQL += "vl_sdbsfm,"
+    stringSQL += "vl_sfbsfm,"
+    stringSQL += "importe,"
+    stringSQL += "comis_financ,"
+    stringSQL += "comis_nao_financ,"
+    stringSQL += "cod_vincula,"
+    stringSQL += "vl_rof,"
+    stringSQL += "vl_tti,"
+    stringSQL += "vl_mtm,"
+    stringSQL += "vl_nacional,"
+    stringSQL += "cod_div_mis,"
+    stringSQL += "flag_mora,"
+    stringSQL += "flag_nova_prod,"
+    stringSQL += "flag_carterizadas,"
+    stringSQL += "nm_cliente,"
+    stringSQL += "tp_pessoa,"
+    stringSQL += "id_cpf_cpnj,"
+    stringSQL += "intragrupo,"
+    stringSQL += "flag_internegocio,"
+    stringSQL += "ds_area_neg_local,"
+    stringSQL += "cd_prod_gest,"
+    stringSQL += "cd_segto_cli_mis,"
+    stringSQL += "id_prod_oper,"
+    stringSQL += "versao_mis as versao_mis,"
+    stringSQL += "dt_renovacao,"
+    stringSQL += "dt_extracao_dados_mis,"
+    stringSQL += "flag_tp_registro,"
+    stringSQL += "vl_orex,"
+    stringSQL += "vl_provisao,"
+    stringSQL += "tp_stage_provisao,"
+    stringSQL += "flag_bdr,"
+    stringSQL += "rastr_hist,"
+    stringSQL += "dt_ref  from {}.{} ".format(database_smart, str_tabela_corp)
+        
+    stringSQL_MesAtual = stringSQL
+    stringSQL_MesAtual += " where dt_ref = {}".format(str_data_mes)
+
+    logging.info('Selecionando mês atual.')
+
+    print ( stringSQL_MesAtual )
+    df_tb_corp = spark.sql(stringSQL_MesAtual)
+
+    stringSQL_MesAnterior = stringSQL
+    stringSQL_MesAnterior += " where dt_ref = {}".format(str_data_mes_ant)
+
+    logging.info('Selecionando mês Anterior.')
+
+    df_tb_corp_ant = spark.sql(stringSQL_MesAnterior)
+    df_tb_corp.cache().count()
+
+    logging.info('Separando contratos ficticios para adicionar no final do processo.')
+    df_tb_corp_fic = df_tb_corp.where("nvl(contrato,'') = '' OR contrato = '-99100' OR LPAD(contrato,29,'0') = '00000000000000000000000000000' ")
+    #df_tb_corp_fic.show(10,False)
+
+    logging.info('Filtrando somente os reais para Corp e Corp Anterior.')
+
+    df_tb_corp = df_tb_corp.where("nvl(contrato,'') != '' AND contrato != '-99100' AND LPAD(contrato,29,'0') != '00000000000000000000000000000' ")
+    df_tb_corp_ant = df_tb_corp_ant.where("nvl(contrato,'') != '' AND contrato != '-99100' AND LPAD(contrato,29,'0') != '00000000000000000000000000000' ")
+
+    logging.info('Mostrando corp atual.')
+    #df_tb_corp.show(10,False)
+    df_tb_corp.select('contrato', 'cd_carte_cliente', 'rastr_hist', 'versao_mis', 'margem_hist' ).show(20,False)
+
+    logging.info('Selecionando tabela corp referente ao Mês Anterior apenas válidos não devem passar da versão 12 ')
+
+    df_tb_corp_ant = df_tb_corp_ant.filter( col('versao_mis').cast(IntegerType())  <= 12)
+    df_tb_corp_ant.cache().count()
+
+    logging.info('Mostrando corp ant - registros que devem ser curados.')
+    df_tb_corp_ant.select('contrato', 'cd_carte_cliente', 'rastr_hist', 'versao_mis', 'margem_hist' ).show(20,False)
+    
+    #--- apenas mock
+    #df_tb_corp_ant = df_tb_corp_ant.limit(0)
+    #df_tb_corp_ant = df_tb_corp_ant.union( df_tb_corp )
+    #df_tb_corp_registro_novo = df_tb_corp_ant.filter("contrato == '00337097661319660004258460000'")
+    #df_tb_corp_registro_novo = df_tb_corp_registro_novo.withColumn('contrato', lit('00330001'))
+    #df_tb_corp_registro_novo = df_tb_corp_registro_novo.withColumn('rastr_hist', lit('1|100|23|5|3.2|-2.7|5|7.0|8|90|100|12'))
+    #df_tb_corp_ant = df_tb_corp_ant.union(df_tb_corp_registro_novo)
+    #df_tb_corp_ant.select('contrato', 'cd_carte_cliente', 'rastr_hist' ).show(100,False)
+
+    logging.info('Ressucitando contratos mês anterior')
+
+    df_tb_contratos_cura = df_tb_corp_ant.join(df_tb_corp, ((df_tb_corp_ant.contrato == df_tb_corp.contrato) & (df_tb_corp_ant.cd_carte_cliente == df_tb_corp.cd_carte_cliente )) , 'leftanti')
+    df_tb_corp_ant.unpersist()
+
+    if df_tb_contratos_cura.limit(1).count() > 0:
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('qtd_pipes', size(split(col('rastr_hist'), r'\|')) - 1)
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('instr_rastr_hist', instr(col('rastr_hist'),'|') )
+
+        logging.info('Tratamento do novo campo de rastr_hist, se passar de 12 meses, o primeiro valor já não existe mais.')
+
+        stringExpr = """CASE WHEN LENGTH(rastr_hist) = 0 then '0' \
+		                 WHEN LENGTH(regexp_replace(rastr_hist,'[^|]','')) >= 11 then \
+                            concat( substring( rastr_hist, instr_rastr_hist+1, length(rastr_hist)) ,'0|') \
+                            else \
+                            concat(rastr_hist,'0|') end """
+        
+        logging.info('Atualizando o valor de rastr_hist de acordo com a regra de 12 meses.')
+
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn("rastr_hist", expr(stringExpr))
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn("rastr_hist", when( (df_tb_contratos_cura.rastr_hist == '0'), lit('0|')).otherwise(df_tb_contratos_cura.rastr_hist) )
+
+        logging.info('Separando os campos de valores para 12 meses para efetuar a somatória e atualizar margem_hist.')
+
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('versao_mis',\
+                                (coalesce(col('versao_mis'), lit(0) ) + 1 ).\
+                                cast(IntegerType()))
+
+        fields_list_drop = ['qtd_pipes', 'instr_rastr_hist']
+        for i in range(12):
+            fields_list_drop.append('valor{}'.format(i+1))
+            df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor{}'.format(i+1), \
+                                coalesce(split(df_tb_contratos_cura['rastr_hist'],'[\|]').getItem(i),lit(0) )  )
+        
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor1', when(trim(df_tb_contratos_cura.valor1) == '',lit(0)).otherwise(df_tb_contratos_cura.valor1) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor2', when(trim(df_tb_contratos_cura.valor2) == '',lit(0)).otherwise(df_tb_contratos_cura.valor2) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor3', when(trim(df_tb_contratos_cura.valor3) == '',lit(0)).otherwise(df_tb_contratos_cura.valor3) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor4', when(trim(df_tb_contratos_cura.valor4) == '',lit(0)).otherwise(df_tb_contratos_cura.valor4) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor5', when(trim(df_tb_contratos_cura.valor5) == '',lit(0)).otherwise(df_tb_contratos_cura.valor5) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor6', when(trim(df_tb_contratos_cura.valor6) == '',lit(0)).otherwise(df_tb_contratos_cura.valor6) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor7', when(trim(df_tb_contratos_cura.valor7) == '',lit(0)).otherwise(df_tb_contratos_cura.valor7) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor8', when(trim(df_tb_contratos_cura.valor8) == '',lit(0)).otherwise(df_tb_contratos_cura.valor8) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor9', when(trim(df_tb_contratos_cura.valor9) == '',lit(0)).otherwise(df_tb_contratos_cura.valor9) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor10', when(trim(df_tb_contratos_cura.valor10) == '',lit(0)).otherwise(df_tb_contratos_cura.valor10) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor11', when(trim(df_tb_contratos_cura.valor11) == '',lit(0)).otherwise(df_tb_contratos_cura.valor11) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor12', when(trim(df_tb_contratos_cura.valor12) == '',lit(0)).otherwise(df_tb_contratos_cura.valor12) )
+
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('margem_hist', col('valor1')  + col('valor2')  + col('valor3') + \
+                                                                              col('valor4')  + col('valor5')  + col('valor6') + \
+                                                                              col('valor7')  + col('valor8')  + col('valor9') + \
+                                                                              col('valor10') + col('valor11') + col('valor12') )
+
+        logging.info('Mostrando os valores novos gerados, campos alterados no processo de cura é versao_mis, rastr_hist, margem_hist.')
+        #df_tb_contratos_cura.select('contrato', 'cd_carte_cliente', 'rastr_hist', 'versao_mis','valor1', 'valor2', 'valor3', 'valor4', 'valor5', 'valor6', 'valor7', 'valor8', 'valor9', 'valor10', 'valor11', 'valor12','margem_hist' ).show(100,False)
+
+        #df_soma = df_tb_contratos_cura.select('contrato', 'cd_carte_cliente', \
+        #                (coalesce(col('versao_mis'), lit(0) ) + 1 ).cast(IntegerType()).alias('nova_versao_mis'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(0),lit(0) ).alias('valor1'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(1),lit(0) ).alias('valor2'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(2),lit(0) ).alias('valor3'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(3),lit(0) ).alias('valor4'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(4),lit(0) ).alias('valor5'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(5),lit(0) ).alias('valor6'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(6),lit(0) ).alias('valor7'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(7),lit(0) ).alias('valor8'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(8),lit(0) ).alias('valor9'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(9),lit(0) ).alias('valor10'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(10),lit(0) ).alias('valor11'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(11),lit(0) ).alias('valor12') )
+
+        logging.info('Excluindo campos desnecessários')
+        df_tb_contratos_cura = df_tb_contratos_cura.drop(*fields_list_drop)
+
+        logging.info('Preparando dataframe para atualização. Unindo Mês atual com Mês anterior')
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('dt_ref', lit(str_data_mes))
+
+        df_tb_corp_principal_final = df_tb_corp.union(df_tb_contratos_cura)
+
+        logging.info('Geração dos campos novos rastr_histr, margem_hist')
+        df_tb_corp_fic = df_tb_corp_fic.withColumn( 'rastr_hist', lit('0|') )
+        df_tb_corp_fic = df_tb_corp_fic.withColumn( 'margem_hist', lit(0) )
+
+        df_tb_corp_principal_final = df_tb_corp_principal_final.union( df_tb_corp_fic )
+        
+        logging.info('Armazenando resultado em cache.')
+        df_tb_corp_principal_final.cache().count()
+
+        #logging.info('Mostrando dataframe final antes de salvar.')
+        #df_tb_corp_principal_final.show(10,False)
+        
+        #logging.info('Teste final apenas no contrato {},{}. '.format('00330021260555260011835601000','00330021260555260011835601010') )
+        #df_tb_corp_principal_final.select('contrato', 'cd_carte_cliente', 'rastr_hist', 'versao_mis', 'margem_hist' ).where( col('contrato').isin( {'00330021260555260011835601000','00330021260555260011835601010'} ) ).show(100,False)
+
+        logging.info('Limpando dataframes desnecessários da memória.')
+        df_tb_contratos_cura.unpersist()
+        df_tb_corp.unpersist()
+        
+        logging.info(df_tb_corp_principal_final.columns)
+
+        # Efetua o insert do dataframe principal cura
+        vrc = 1
+        try:
+            logging.info('Salvando Tabela {}'.format( param['tabelas']['rorac_corp']) )
+
+            write_hive_table(spark, df_tb_corp_principal_final, 'smart_ror', param['tabelas']['rorac_corp'], overwrite=True)
+            vrc = 0
+        except ValueError as error:
+            print ("error saving " + str(error))
+
+    else:
+        logging.info('Não existe registros para executar a cura.')    
+        vrc = 0
+
+        df_tb_corp_ant.unpersist()
+        df_tb_corp.unpersist()
+        df_tb_contratos_cura.unpersist()
+    
+    spark.stop()
+    sys.exit(vrc)
+
+
+
+#CORP - ATIVO / PASSIVO
+
+# -*- coding: utf-8 -*-
+import sys
+reload(sys)
+sys.setdefaultencoding('utf-8')
+sys.dont_write_bytecode=True
+from in_out import source, target
+from transformation import manipulation
+from pyspark.sql.functions import concat, col, lit, expr, trim, coalesce, lpad, sum as _sum, row_number, split, when, size, length, substring, instr
+from pyspark.sql.window import *
+from pyspark.sql.types import StringType, IntegerType
+from pyspark.sql import SQLContext, SparkSession, HiveContext
+from pyspark import SparkContext, SparkConf
+import logging
+import logging.config
+logger = logging.getLogger()
+import argparse
+
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
+
+def write_hive_table(spark, df, dbName, tableName, overwrite=False):
+    tableColumns = [list(x) for x in (spark.catalog.listColumns(tableName, dbName))]
+    orderedColumns = [x[0] for x in tableColumns]
+    dfWithSchemaOrdered = df.select(*orderedColumns)
+    
+    dfWithSchemaOrdered.show(10,False)
+    dfWithSchemaOrdered.write.insertInto(dbName + "." + tableName, overwrite=overwrite)
+
+if __name__ == '__main__':
+
+    # Atribui os parametros passados pela shell
+    parser = argparse.ArgumentParser(description = 'Processing')
+    parser.add_argument('--workflow', help= 'Nome do workflow', required=True)
+    parser.add_argument('--user', help= 'Usuario do servidor', required=True)
+    parser.add_argument('--database_smart', help= 'database das tabelas smart utilizadas no processo', required=True)
+    parser.add_argument('--tb_contrato_rorac_corp', help= 'tabela tb_contrato_rorac_corp', required=True)
+    parser.add_argument('--o_date', help= 'O_date de processamento', required=True)
+    args = parser.parse_args()
+    
+    # Atribui as variaveis 
+    workflow = args.workflow
+    user = args.user
+    database_smart = args.database_smart
+    str_tabela_corp = args.tb_contrato_rorac_corp
+    o_date = args.o_date
+
+    spark = SparkSession.builder \
+        .appName("[ROR] -> CROSS CORP CURA") \
+        .enableHiveSupport() \
+        .config("spark.sql.hive.convertMetastoreParquet", "False") \
+        .config("spark.debug.maxToStringFields", "100") \
+        .config("spark.sql.crossJoin.enabled", "True") \
+        .config("spark.sql.hive.convertMetastoreParquet", "False") \
+        .config("hive.exec.dynamic.partition","true") \
+        .config("hive.exec.dynamic.partition.mode","nonstrict") \
+        .getOrCreate()
+
+    ## Apenas de testes
+    #workflow = ''
+    #user = 'ror_bdata_h'
+    #database_smart = 'smart_ror'
+    #str_tabela_corp = 'tb_contrato_rorac_corp'
+    #o_date = '201901'
+
+    #o_date = '20190210'
+    #print 'parametro - {}'.format(o_date)
+    #d_date = datetime.strptime(o_date, '%Y%m%d')
+    #str_odate = date(d_date.year, d_date.month,1) - relativedelta(days=1)
+    #str_data_mes = datetime.strftime(str_odate, '%Y%m')
+    #print str_data_mes
+
+    #d_date_ant =  d_date - relativedelta(months=2)
+    #str_data_mes_ant = datetime.strftime(d_date_ant, '%Y%m')
+    #print str_data_mes_ant
+       
+    # Efetua a leitura dos parametros de log
+    param = source.read_json('config')
+
+    # Efetua a leitura parametros do json com informacoes de dataframes
+    dataframes = source.read_json('dataframes')
+
+    # Utiliza os parametros de login presentes no json
+    logging.config.dictConfig(param['logging'])
+        
+    # Recebe a data de acordo com o formato desejado retornando mês anterior somente do ODATE 
+    str_data_mes = manipulation.data_formater(o_date, 'YYYYMM')
+    logging.info("Data Odate - {}".format(str_data_mes) )
+
+    # Retornar ODATE - MÊS ANTERIOR
+    d_date = datetime.strptime(o_date, '%Y%m%d')
+
+    d_date_ant =  d_date - relativedelta(months=2)
+    str_data_mes_ant = datetime.strftime(d_date_ant, '%Y%m')
+    logging.info("Data Odate Anterior - {}".format(str_data_mes_ant) )
+
+
+    ##teste
+#    o_date = '20190910'
+#    print 'parametro - {}'.format(o_date)
+#    d_date = datetime.strptime(o_date, '%Y%m%d')
+#    str_odate = date(d_date.year, d_date.month,1) - relativedelta(days=1)
+#    str_data_mes_ant = datetime.strftime(str_odate, '%Y%m')
+#    print str_data_mes_ant
+
+#    d_date_ant =  d_date - relativedelta(months=2)
+#    str_data_mes_ant = datetime.strftime(d_date_ant, '%Y%m')
+#    print str_data_mes_ant
+
+
+    # Efetua o select com a particao para criar dataframe df_tb_corp
+    logging.info('INICIANDO LEITURA DA TABELA: {}'.format(str_tabela_corp))
+    
+    stringSQL = "select cod_banco,"
+    stringSQL += "dt_extracao,"
+    stringSQL += "finalidade_dados,"
+    stringSQL += "contrato,"
+    stringSQL += "cd_dim_area_neg,"
+    stringSQL += "divisa,"
+    stringSQL += "porc_erros,"
+    stringSQL += "cd_segto,"
+    stringSQL += "cd_subproduto,"
+    stringSQL += "id_risk_unit,"
+    stringSQL += "penumper,"
+    stringSQL += "id_empresa_bdr,"
+    stringSQL += "id_cliente_bdr,"
+    stringSQL += "margem_mes,"
+    stringSQL += "margem_ytd,"
+    stringSQL += "margem_hist,"
+    stringSQL += "vl_sdbsmv,"
+    stringSQL += "vl_sfbsmv,"
+    stringSQL += "vl_ead_mmff,"
+    stringSQL += "fg_mmff,"
+    stringSQL += "dt_formalizacao,"
+    stringSQL += "dt_vencimento,"
+    stringSQL += "cd_agencia,"
+    stringSQL += "cd_carteira_pv,"
+    stringSQL += "territorial,"
+    stringSQL += "cd_carte_gestor,"
+    stringSQL += "cd_carte_cliente,"
+    stringSQL += "id_contrato_bdr,"
+    stringSQL += "vl_sdbsfm,"
+    stringSQL += "vl_sfbsfm,"
+    stringSQL += "importe,"
+    stringSQL += "comis_financ,"
+    stringSQL += "comis_nao_financ,"
+    stringSQL += "cod_vincula,"
+    stringSQL += "vl_rof,"
+    stringSQL += "vl_tti,"
+    stringSQL += "vl_mtm,"
+    stringSQL += "vl_nacional,"
+    stringSQL += "cod_div_mis,"
+    stringSQL += "flag_mora,"
+    stringSQL += "flag_nova_prod,"
+    stringSQL += "flag_carterizadas,"
+    stringSQL += "nm_cliente,"
+    stringSQL += "tp_pessoa,"
+    stringSQL += "id_cpf_cpnj,"
+    stringSQL += "intragrupo,"
+    stringSQL += "flag_internegocio,"
+    stringSQL += "ds_area_neg_local,"
+    stringSQL += "cd_prod_gest,"
+    stringSQL += "cd_segto_cli_mis,"
+    stringSQL += "id_prod_oper,"
+    stringSQL += "versao_mis as versao_mis,"
+    stringSQL += "dt_renovacao,"
+    stringSQL += "dt_extracao_dados_mis,"
+    stringSQL += "flag_tp_registro,"
+    stringSQL += "vl_orex,"
+    stringSQL += "vl_provisao,"
+    stringSQL += "tp_stage_provisao,"
+    stringSQL += "flag_bdr,"
+    stringSQL += "rastr_hist,"
+    stringSQL += "dt_ref  from {}.{} ".format(database_smart, str_tabela_corp)
+        
+    stringSQL_MesAtual = stringSQL
+    stringSQL_MesAtual += " where dt_ref = {}".format(str_data_mes)
+
+    logging.info('Selecionando mês atual.')
+
+    print ( stringSQL_MesAtual )
+    df_tb_corp = spark.sql(stringSQL_MesAtual)
+
+    stringSQL_MesAnterior = stringSQL
+    stringSQL_MesAnterior += " where dt_ref = {}".format(str_data_mes_ant)
+
+    logging.info('Selecionando mês Anterior.')
+
+    df_tb_corp_ant = spark.sql(stringSQL_MesAnterior)
+    df_tb_corp.cache().count()
+
+    logging.info('Separando contratos ficticios para adicionar no final do processo.')
+    df_tb_corp_fic = df_tb_corp.where("nvl(contrato,'') = '' OR contrato = '-99100' OR LPAD(contrato,29,'0') = '00000000000000000000000000000' ")
+    #df_tb_corp_fic.show(10,False)
+
+    logging.info('Filtrando somente os reais para Corp e Corp Anterior.')
+
+    df_tb_corp = df_tb_corp.where("nvl(contrato,'') != '' AND contrato != '-99100' AND LPAD(contrato,29,'0') != '00000000000000000000000000000' ")
+    df_tb_corp_ant = df_tb_corp_ant.where("nvl(contrato,'') != '' AND contrato != '-99100' AND LPAD(contrato,29,'0') != '00000000000000000000000000000' ")
+
+    logging.info('Mostrando corp atual.')
+    #df_tb_corp.show(10,False)
+    df_tb_corp.select('contrato', 'cd_carte_cliente', 'rastr_hist', 'versao_mis', 'margem_hist' ).show(20,False)
+
+    logging.info('Selecionando tabela corp referente ao Mês Anterior apenas válidos não devem passar da versão 12 ')
+
+    df_tb_corp_ant = df_tb_corp_ant.filter( col('versao_mis').cast(IntegerType())  <= 12)
+    df_tb_corp_ant.cache().count()
+
+    logging.info('Mostrando corp ant - registros que devem ser curados.')
+    df_tb_corp_ant.select('contrato', 'cd_carte_cliente', 'rastr_hist', 'versao_mis', 'margem_hist' ).show(20,False)
+    
+    #--- apenas mock
+    #df_tb_corp_ant = df_tb_corp_ant.limit(0)
+    #df_tb_corp_ant = df_tb_corp_ant.union( df_tb_corp )
+    #df_tb_corp_registro_novo = df_tb_corp_ant.filter("contrato == '00337097661319660004258460000'")
+    #df_tb_corp_registro_novo = df_tb_corp_registro_novo.withColumn('contrato', lit('00330001'))
+    #df_tb_corp_registro_novo = df_tb_corp_registro_novo.withColumn('rastr_hist', lit('1|100|23|5|3.2|-2.7|5|7.0|8|90|100|12'))
+    #df_tb_corp_ant = df_tb_corp_ant.union(df_tb_corp_registro_novo)
+    #df_tb_corp_ant.select('contrato', 'cd_carte_cliente', 'rastr_hist' ).show(100,False)
+
+    logging.info('Ressucitando contratos mês anterior')
+
+    df_tb_contratos_cura = df_tb_corp_ant.join(df_tb_corp, ((df_tb_corp_ant.contrato == df_tb_corp.contrato) & (df_tb_corp_ant.cd_carte_cliente == df_tb_corp.cd_carte_cliente )) , 'leftanti')
+    df_tb_corp_ant.unpersist()
+
+    if df_tb_contratos_cura.limit(1).count() > 0:
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('qtd_pipes', size(split(col('rastr_hist'), r'\|')) - 1)
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('instr_rastr_hist', instr(col('rastr_hist'),'|') )
+
+        logging.info('Tratamento do novo campo de rastr_hist, se passar de 12 meses, o primeiro valor já não existe mais.')
+
+        stringExpr = """CASE WHEN LENGTH(rastr_hist) = 0 then '0' \
+		                 WHEN LENGTH(regexp_replace(rastr_hist,'[^|]','')) >= 11 then \
+                            concat( substring( rastr_hist, instr_rastr_hist+1, length(rastr_hist)) ,'0|') \
+                            else \
+                            concat(rastr_hist,'0|') end """
+        
+        logging.info('Atualizando o valor de rastr_hist de acordo com a regra de 12 meses.')
+
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn("rastr_hist", expr(stringExpr))
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn("rastr_hist", when( (df_tb_contratos_cura.rastr_hist == '0'), lit('0|')).otherwise(df_tb_contratos_cura.rastr_hist) )
+
+        logging.info('Separando os campos de valores para 12 meses para efetuar a somatória e atualizar margem_hist.')
+
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('versao_mis',\
+                                (coalesce(col('versao_mis'), lit(0) ) + 1 ).\
+                                cast(IntegerType()))
+
+        fields_list_drop = ['qtd_pipes', 'instr_rastr_hist']
+        for i in range(12):
+            fields_list_drop.append('valor{}'.format(i+1))
+            df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor{}'.format(i+1), \
+                                coalesce(split(df_tb_contratos_cura['rastr_hist'],'[\|]').getItem(i),lit(0) )  )
+        
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor1', when(trim(df_tb_contratos_cura.valor1) == '',lit(0)).otherwise(df_tb_contratos_cura.valor1) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor2', when(trim(df_tb_contratos_cura.valor2) == '',lit(0)).otherwise(df_tb_contratos_cura.valor2) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor3', when(trim(df_tb_contratos_cura.valor3) == '',lit(0)).otherwise(df_tb_contratos_cura.valor3) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor4', when(trim(df_tb_contratos_cura.valor4) == '',lit(0)).otherwise(df_tb_contratos_cura.valor4) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor5', when(trim(df_tb_contratos_cura.valor5) == '',lit(0)).otherwise(df_tb_contratos_cura.valor5) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor6', when(trim(df_tb_contratos_cura.valor6) == '',lit(0)).otherwise(df_tb_contratos_cura.valor6) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor7', when(trim(df_tb_contratos_cura.valor7) == '',lit(0)).otherwise(df_tb_contratos_cura.valor7) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor8', when(trim(df_tb_contratos_cura.valor8) == '',lit(0)).otherwise(df_tb_contratos_cura.valor8) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor9', when(trim(df_tb_contratos_cura.valor9) == '',lit(0)).otherwise(df_tb_contratos_cura.valor9) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor10', when(trim(df_tb_contratos_cura.valor10) == '',lit(0)).otherwise(df_tb_contratos_cura.valor10) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor11', when(trim(df_tb_contratos_cura.valor11) == '',lit(0)).otherwise(df_tb_contratos_cura.valor11) )
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('valor12', when(trim(df_tb_contratos_cura.valor12) == '',lit(0)).otherwise(df_tb_contratos_cura.valor12) )
+
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('margem_hist', col('valor1')  + col('valor2')  + col('valor3') + \
+                                                                              col('valor4')  + col('valor5')  + col('valor6') + \
+                                                                              col('valor7')  + col('valor8')  + col('valor9') + \
+                                                                              col('valor10') + col('valor11') + col('valor12') )
+
+        logging.info('Mostrando os valores novos gerados, campos alterados no processo de cura é versao_mis, rastr_hist, margem_hist.')
+        #df_tb_contratos_cura.select('contrato', 'cd_carte_cliente', 'rastr_hist', 'versao_mis','valor1', 'valor2', 'valor3', 'valor4', 'valor5', 'valor6', 'valor7', 'valor8', 'valor9', 'valor10', 'valor11', 'valor12','margem_hist' ).show(100,False)
+
+        #df_soma = df_tb_contratos_cura.select('contrato', 'cd_carte_cliente', \
+        #                (coalesce(col('versao_mis'), lit(0) ) + 1 ).cast(IntegerType()).alias('nova_versao_mis'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(0),lit(0) ).alias('valor1'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(1),lit(0) ).alias('valor2'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(2),lit(0) ).alias('valor3'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(3),lit(0) ).alias('valor4'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(4),lit(0) ).alias('valor5'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(5),lit(0) ).alias('valor6'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(6),lit(0) ).alias('valor7'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(7),lit(0) ).alias('valor8'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(8),lit(0) ).alias('valor9'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(9),lit(0) ).alias('valor10'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(10),lit(0) ).alias('valor11'), \
+        #                coalesce(split(df_tb_contratos_cura['novo_rastr_hist'],'\\|').getItem(11),lit(0) ).alias('valor12') )
+
+        logging.info('Excluindo campos desnecessários')
+        df_tb_contratos_cura = df_tb_contratos_cura.drop(*fields_list_drop)
+
+        logging.info('Preparando dataframe para atualização. Unindo Mês atual com Mês anterior')
+        df_tb_contratos_cura = df_tb_contratos_cura.withColumn('dt_ref', lit(str_data_mes))
+
+        df_tb_corp_principal_final = df_tb_corp.union(df_tb_contratos_cura)
+
+        logging.info('Geração dos campos novos rastr_histr, margem_hist')
+        df_tb_corp_fic = df_tb_corp_fic.withColumn( 'rastr_hist', lit('0|') )
+        df_tb_corp_fic = df_tb_corp_fic.withColumn( 'margem_hist', lit(0) )
+
+        df_tb_corp_principal_final = df_tb_corp_principal_final.union( df_tb_corp_fic )
+        
+        logging.info('Armazenando resultado em cache.')
+        df_tb_corp_principal_final.cache().count()
+
+        #logging.info('Mostrando dataframe final antes de salvar.')
+        #df_tb_corp_principal_final.show(10,False)
+        
+        #logging.info('Teste final apenas no contrato {},{}. '.format('00330021260555260011835601000','00330021260555260011835601010') )
+        #df_tb_corp_principal_final.select('contrato', 'cd_carte_cliente', 'rastr_hist', 'versao_mis', 'margem_hist' ).where( col('contrato').isin( {'00330021260555260011835601000','00330021260555260011835601010'} ) ).show(100,False)
+
+        logging.info('Limpando dataframes desnecessários da memória.')
+        df_tb_contratos_cura.unpersist()
+        df_tb_corp.unpersist()
+        
+        logging.info(df_tb_corp_principal_final.columns)
+
+        # Efetua o insert do dataframe principal cura
+        vrc = 1
+        try:
+            logging.info('Salvando Tabela {}'.format( param['tabelas']['rorac_corp']) )
+
+            write_hive_table(spark, df_tb_corp_principal_final, 'smart_ror', param['tabelas']['rorac_corp'], overwrite=True)
+            vrc = 0
+        except ValueError as error:
+            print ("error saving " + str(error))
+
+    else:
+        logging.info('Não existe registros para executar a cura.')    
+        vrc = 0
+
+        df_tb_corp_ant.unpersist()
+        df_tb_corp.unpersist()
+        df_tb_contratos_cura.unpersist()
+    
+    spark.stop()
+    sys.exit(vrc)
+
+
+#KPI
+
+# -*- coding: utf-8 -*-
+
+import sys
+reload(sys)
+sys.setdefaultencoding('utf-8')
+sys.dont_write_bytecode=True
+from pyspark.sql.functions import count, col, lit, coalesce, concat
+from pyspark.sql import Row
+from pyspark.sql import SparkSession
+from transformation import manipulation
+from auxiliar import func_ger, get_spark
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
+import argparse
+import subprocess
+
+
+def main():
+
+    spark = get_spark.Session('ROS - EXTRACAO KPIs').GetSpark()
+
+    # Atribui os parametros passados pela shell
+    parser = argparse.ArgumentParser(description = 'Processing')
+    parser.add_argument('--workflow', help= 'Nome do workflow', required=True)
+    parser.add_argument('--user', help= 'Usuario do servidor', required=True)
+    parser.add_argument('--banco', help= 'Database das tabelas nkey e rnkd', required=True)
+    parser.add_argument('--tabela', help= 'tabela', required=True)
+    parser.add_argument('--o_date', help='o_date', required=True)
+    parser.add_argument('--cd_arq', help= 'cd_arquivos', required=True)
+    args = parser.parse_args()
+
+    # Atribui as variaveis
+    workflow = args.workflow
+    user = args.user
+    banco = args.banco
+    tabela = args.tabela
+    o_date = args.o_date
+    cd_arq = args.cd_arq
+
+    # MANIPULANDO DATAS ---------------------------------------------------------------------------------------------------------
+    data_mes = manipulation.data_formater(o_date, 'YYYYMM')
+    print("data_mes: " + str(data_mes))
+    data_dia = manipulation.data_formater(o_date, 'YYYYMMDD')
+    print("data_dia: " + str(data_dia))
+    data_ult = manipulation.ult_dia(o_date)
+    print("data_ult: " + str(data_ult))
+    data_mes_at = manipulation.mes_atual(o_date, '%Y%m')
+    print("data_mes_at: " + str(data_mes_at))
+    data_mod = manipulation.data_formater(o_date, 'YYMM')
+    print("data_mod: " + str(data_mod))
+    #VOLTA 2 VEZES NO MES ANTERIOR PARA LER A CAPIT_RIES QUE VEM DEFASADA
+    data_ajustada_capit_ries = func_ger.last_YYYYMMDD_ant(func_ger.last_YYYYMMDD_ant(o_date))
+    print("data_ajustada_capit_ries: " + str(data_ajustada_capit_ries))
+    data_ajustada = func_ger.to_YYYY_MM(data_ajustada_capit_ries)
+    print("data_ajustada: " + str(data_ajustada))
+    #DATA MES ANTERIOR
+    data_mes_ant = datetime.strptime(data_mes, '%Y%m')
+    print("data_mes_ant: " + str(data_mes_ant))
+    data_mes_ant = date(data_mes_ant.year, data_mes_ant.month, 1) - relativedelta(months=1)
+    print("data_mes_ant: " + str(data_mes_ant))
+    data_mes_ant = datetime.strftime(data_mes_ant, '%Y%m')
+    print("data_mes_ant: " + str(data_mes_ant))
+
+
+    print("SELECT DOMAIN_CODE - TB_NATIVE_KEY")
+
+    print("COUNT DAS BASES NKEY / CRIANDO DF_BDR (DOMAIN_CODE = 00001) -----------------------------------------------------------")
+    df_bdr = spark.sql("select master_key from {}.{} where dt_ref = {} and domain_code = '00001'".format(banco, tabela, data_mes))
+  
+    print("VARIEAVEL COUNT_BDR_NKEY RECEBE COUNT DA BDR")  
+    count_bdr_nkey = df_bdr.dropDuplicates(["master_key"]).count()
+    print("count_bdr_nkey: " + str(count_bdr_nkey))    
+
+    print("COUNT DAS BASES NKEY / CRIANDO DF_ICAAP (DOMAIN_CODE = 00004) ---------------------------------------------------------")
+    df_icaap = spark.sql("select master_key from {}.{} where dt_ref = {} and domain_code = '00004'".format(banco, tabela, data_mes))
+
+    print("VARIEAVEL COUNT_ICAAP_NKEY RECEBE COUNT DA JM_COUNTR_BIS")
+    count_icaap_nkey = df_icaap.dropDuplicates(["master_key"]).count()
+    print("count_icaap_nkey: " + str(count_icaap_nkey))
+
+    print("COUNT DAS BASES NKEY / CRIANDO DF_MIS (DOMAIN_CODE = 00005) -----------------------------------------------------------")
+    df_mis = spark.sql("select master_key from {}.{} where dt_ref = {} and domain_code = '00005'".format(banco, tabela, data_mes))
+
+    print("VARIEAVEL COUNT_MIS_NKEY RECEBE COUNT DA MIS")
+    count_mis_nkey = df_mis.dropDuplicates(["master_key"]).count()
+    print("count_mis_nkey: " + str(count_mis_nkey))    
+
+    print(" COUNT DAS BASES NKEY / CRIANDO DF_CREDIT (DOMAIN_CODE = 00013) --------------------------------------------------------")
+    df_cred = spark.sql("select master_key from {}.{} where dt_ref = {} and domain_code = '00013'".format(banco, tabela, data_mes))
+
+    print(" VARIEAVEL COUNT_CREDIT_NKEY RECEBE COUNT DA IFRS9")
+    count_credit_nkey = df_cred.dropDuplicates(["master_key"]).count()
+    print("count_credit_nkey: " + str(count_credit_nkey))    
+
+    print(" COUNT DAS BASES NKEY / CRIANDO DF_IFRS (DOMAIN_CODE = 00014) ----------------------------------------------------------")
+    df_ifrs = spark.sql("select master_key from {}.{} where dt_ref = {} and domain_code = '00014'".format(banco, tabela, data_mes))
+
+    print(" VARIEAVEL COUNT_IFRS_NKEY RECEBE COUNT DA IFRS9")
+    count_ifrs_nkey = df_ifrs.dropDuplicates(["master_key"]).count()
+    print("count_ifrs_nkey: " + str(count_ifrs_nkey))    
+
+    print(" FIM DA LEITURA DAS TABELAS NKEY ---------------------------------------------------------------------------------------")
+
+    print(" SELECT DAS ORIGENS ----------------------------------------------------------------------------------------------------")
+    # BDR
+    df_contr = spark.sql("select contra1 from bma.jm_contr_bis where dt_refe = {}".format(data_mes))
+    print(" VARIAVEL COUNT_CONTR RECEBE COUNT DA JM_CONTR_BIS")
+    count_contr = df_contr.dropDuplicates(["contra1"]).count()
+
+    # MIS
+    df_histo = spark.sql("select CONTRATO from db_nme.nme_mensal_histo where data_particao ={}".format(data_dia))
+    print(" VARIEAVEL COUNT_HISTO RECEBE COUNT DA NME_MENSAL_HISTO")
+    count_histo = df_histo.dropDuplicates(["CONTRATO"]).count()
+
+    # PARQUET's MODELLICA
+    try:
+        print("Buscando contrato_altair na tabela bu_ifrs9.tb_output_modellica_ifrs9_{}".format(data_mod))
+        df_ifrs1 = spark.sql("select contrato_altair from bu_ifrs9.tb_output_modellica_ifrs9_{}".format(data_mod))
+        print("Buscando contrato_altair na tabela bu_ifrs9.tb_output_modellica_ifrs9_comex_off_{}".format(data_mod))
+        df_ifrs2 = spark.sql("select contrato_altair from bu_ifrs9.tb_output_modellica_ifrs9_comex_off_{}".format(data_mod))
+        print("Buscando contrato_altair na tabela bu_ifrs9.tb_output_modellica_ifrs9_mmff_{}".format(data_mod))
+        df_ifrs3 = spark.sql("select contrato_altair from bu_ifrs9.tb_output_modellica_ifrs9_mmff_{}".format(data_mod))
+        print("union de tabelas ifrs9")
+        df_ifrs_full = df_ifrs1.union(df_ifrs2).union(df_ifrs3)
+        print("DF_IFRS_FULL GERADO COM SUCESSO")
+    except:
+        print('Tabelas IFRS9 inexistentes, gerando df_vazio')
+        lista_ifrs = ["mock"]
+        layout_ifrs = ["contrato_altair"]
+        df_ifrs_full = spark.createDataFrame([lista_ifrs], layout_ifrs).limit(0)
+        df_ifrs_full.show()
+
+
+    print(" VARIEAVEL COUNT_IFRS_NKEY RECEBE COUNT DA IFRS9")
+    count_ifrs = df_ifrs_full.dropDuplicates(["contrato_altair"]).count()
+
+    # CAPIT_RIES
+    try:
+        df_capit = spark.sql("select r9624_contra1 from bma.jm_capit_ries where dat_ref_carga = {}".format(data_ajustada))
+        print('Buscando tabela oficial')
+    except:
+        df_capit = spark.sql("select r9624_contra1 from ros.jm_capit_ries where dat_ref_carga = {}".format(data_ajustada))
+        print('Buscando tabela mock')
+    # VARIAVEL COUNT_CAPIT RECEBE COUNT DA JM_CAPIT_RIES
+    count_capit = df_capit.dropDuplicates(["r9624_contra1"]).count()
+    print(" FIM DA LEITURA DAS ORIGENS ----------------------------------------------------------------------------------------------")
+    
+    print("----------------------- C A L C U L O S - D I F E R E N C A --------------------------------------------------------------")
+    dif_bdr = count_contr - count_bdr_nkey
+    dif_mis = count_histo - count_mis_nkey
+    dif_ifrs = count_ifrs - count_ifrs_nkey
+    dif_icaap = count_contr - count_icaap_nkey
+    dif_credit = count_ifrs - count_credit_nkey
+    
+    if cd_arq =='00':
+        print("ARQUIVO 00")
+        row1 = Row(AMBIT="BDR", COUNT_LAKE=count_contr, COUNT_BASE=count_bdr_nkey, DIFFERENCE=dif_bdr)
+        row6 = Row(AMBIT="MIS", COUNT_LAKE=count_histo, COUNT_BASE=count_mis_nkey, DIFFERENCE=dif_mis)
+        row11 = Row(AMBIT="IFRS9", COUNT_LAKE=count_ifrs, COUNT_BASE=count_ifrs_nkey, DIFFERENCE=dif_ifrs)
+        row16 = Row(AMBIT="ICAAP", COUNT_LAKE=count_contr, COUNT_BASE=count_icaap_nkey, DIFFERENCE=dif_icaap)
+        row21 = Row(AMBIT="CREDIT_RISK", COUNT_LAKE=count_ifrs, COUNT_BASE=count_credit_nkey, DIFFERENCE=dif_credit)
+        df_main = spark.createDataFrame([row1, row6, row11, row16, row21])
+        df_main.show()
+        gerar_csv(df_main, cd_arq, data_mes)
+
+
+    elif cd_arq == '01':
+        print(" CASE CD_ARQ = 01 -------- C R U Z A M E N T O S - B D R -----------------------------------------------------------------")
+
+        lista_01 = []
+
+        # ICAAP
+        df_bdrxicaap = df_bdr.join(df_icaap, ( df_icaap.master_key == df_bdr.master_key ),'inner' )
+        match_bdrxicaap = df_bdrxicaap.count()
+        no_match = count_bdr_nkey - match_bdrxicaap
+        row2 = Row(AMBIT="BDR x ICAAP", COUNT_LAKE=count_contr, COUNT_BASE=count_bdr_nkey, DIFFERENCE=dif_bdr, MATCH=match_bdrxicaap, NO_MATCH=no_match, PERCENT=match_bdrxicaap/zeroTo1(count_bdr_nkey))
+        lista_01.append(row2)
+
+        # MIS
+        df_bdrxmis = df_bdr.join(df_mis, ( df_mis.master_key == df_bdr.master_key ),'inner' )
+        match_bdrxmis = df_bdrxmis.count()
+        no_match = count_bdr_nkey - match_bdrxmis
+        row3 = Row(AMBIT="BDR x MIS", COUNT_LAKE=count_contr, COUNT_BASE=count_bdr_nkey, DIFFERENCE=dif_bdr, MATCH=match_bdrxmis, NO_MATCH=no_match, PERCENT=match_bdrxmis/zeroTo1(count_bdr_nkey))
+        lista_01.append(row3)
+
+        # CREDIT_RISK
+        df_bdrxcredit = df_bdr.join(df_cred, ( df_cred.master_key == df_bdr.master_key ),'inner' )
+        match_bdrxcredit = df_bdrxcredit.count()
+        no_match = count_bdr_nkey - match_bdrxcredit
+        row4 = Row(AMBIT="BDR x CREDIT_RISK", COUNT_LAKE=count_contr, COUNT_BASE=count_bdr_nkey, DIFFERENCE=dif_bdr, MATCH=match_bdrxcredit, NO_MATCH=no_match, PERCENT=match_bdrxcredit/zeroTo1(count_bdr_nkey))
+        lista_01.append(row4)
+
+        # IFRS9
+        df_bdrxifrs = df_bdr.join(df_ifrs_full, ( df_ifrs_full['contrato_altair'] == df_bdr.master_key ),'inner' )
+        match_bdrxifrs = df_bdrxifrs.count()
+        no_match = count_bdr_nkey - match_bdrxifrs
+        row5 = Row(AMBIT="BDR x IFRS9", COUNT_LAKE=count_contr, COUNT_BASE=count_bdr_nkey, DIFFERENCE=dif_bdr, MATCH=match_bdrxifrs, NO_MATCH=no_match, PERCENT=match_bdrxifrs/zeroTo1(count_bdr_nkey))
+        lista_01.append(row5)
+
+        print(" CRIANDO DF_MAIN COM ROWS")
+        df_main = spark.createDataFrame(lista_01)
+
+        print(" VARIAVEL #DIF_MES RECEBE DIFERENÇA ENTRE MES ATUAL E MES ANTERIOR")
+        dif_mes = read_mes_ant(spark, df_main, cd_arq, data_mes_ant)
+        print("show dif_mes")
+        dif_mes.show()
+        df_main = calc_dif(df_main, dif_mes)
+        
+        print("show df_main")
+        df_main.show()
+
+        gerar_csv(df_main, cd_arq, data_mes)
+        print(" FIM CASE 01 -------------------------------------------------------------------------------------------------------------")
+
+    elif cd_arq == '11':
+        print(" CASE CD_ARQ = 11 ------- C R U Z A M E N T O S - C A P I R B ---------------------------------------------------------")
+    
+        print(" COUNT DAS BASES E CRIANDO DF_CAPIRB (DOMAIN_CODE = 00005 and SEGMENTATION_CODE = 00001) --------------------------")
+        df_capirb = spark.sql("select * from smart_ros.tb_native_key_dimensions where dt_ref = {} and domain_code = '00005' and segmentation_code = '00001'".format(data_mes))
+        print(" VARIEAVEL COUNT_CAPIRB_RNKD RECEBE COUNT DA RKND")
+        count_capirb_rnkd = df_capirb.count()
+
+        print(" LER CSV MES ANTERIOR")
+        
+        print(" VARIAVEL DIF_CREDIT RECEBE CALCULO LAKE - BASE")
+        dif_capirb = count_contr - count_capirb_rnkd
+        
+        print(" VARIAVEL ROW RECEBE CAMPOS PARA CARREGAR NO DF_MAIN")
+        row26 = Row(AMBIT="CATEG e SUBCAT", COUNT_LAKE=count_contr, COUNT_BASE=count_capirb_rnkd, DIFFERENCE=dif_capirb, MATCH=0, NO_MATCH=0, PERCENT=0)
+        print(" CRIANDO DF_MAIN COM ROWS")
+        df_main = spark.createDataFrame([row26])
+
+        print(" VARIAVEL #DIF_MES RECEBE DIFERENÇA ENTRE MES ATUAL E MES ANTERIOR")
+        dif_mes = read_mes_ant(spark, df_main, cd_arq, data_mes_ant)
+        print("show dif_mes")
+        dif_mes.show()
+        df_main = calc_dif(df_main, dif_mes)
+        print("show df_main")
+        df_main.show()
+
+        gerar_csv(df_main, cd_arq, data_mes)
+        print(" FIM CASE 11 ----------------------------------------------------------------------------------------------------------")
+    else:
+        print("CD_ARQUIVO INVÁLIDO")
+        sys.exit(1)
+    spark.stop()
+    
+
+
+
+#FUNÇÃO PARA GERAR CSV's
+def gerar_csv(df_main, cd_arq, data_mes):
+    #Criando diretório 
+    lcArquivo = "/sistemas/ros/saida/kpi/KPI_{cd_arq}_{data_mes}".format(cd_arq=cd_arq, data_mes=data_mes)
+    lcArquivoRenamed = "/sistemas/ros/saida/kpi/KPI_{cd_arq}_{data_mes}/KPI_{cd_arq}_{data_mes}.csv".format(cd_arq=cd_arq, data_mes=data_mes)
+    # CRIANDO ARQUIVO 
+    print("SALVANDO ARQUIVO {}".format(lcArquivo))
+    if cd_arq != '00':
+        df_main \
+            .withColumn('PERCENT', concat(col('PERCENT'), lit("%"))) \
+            .coalesce(1) \
+            .write \
+            .format('csv') \
+            .mode('overwrite') \
+            .save(header=True, path=lcArquivo)
+    else:
+        df_main \
+            .coalesce(1) \
+            .write \
+            .format('csv') \
+            .mode('overwrite') \
+            .save(header=True, path=lcArquivo)
+    print("ALTERANDO NOME DO ARQUIVO {} para {}.csv".format(lcArquivo, lcArquivo))
+    subprocess.call(['hdfs', 'dfs', '-mv', lcArquivo + "/*.csv", lcArquivoRenamed])
+
+
+#FUNÇÃO PARA DF DO MES ANTERIOR
+def read_mes_ant(spark, df_main, cd_arq, data_mes_ant):
+    lcArquivoRenamed = "/sistemas/ros/saida/kpi/KPI_{cd_arq}_{data_mes_ant}/KPI_{cd_arq}_{data_mes_ant}.csv".format(cd_arq=cd_arq, data_mes_ant=data_mes_ant)
+    print('Buscando arquivo do mes anterior no diretório: ' + lcArquivoRenamed)
+    try:
+        df_mes_ant = spark.read.format('csv') \
+            .option('inferSchema', 'True') \
+            .option('header', 'True') \
+            .load(lcArquivoRenamed)
+        print("dataframe de arquivo do mes anterior gerado com sucesso")
+    except:
+        df_mes_ant = df_main \
+            .withColumn('COUNT_LAKE', lit(0)) \
+            .withColumn('COUNT_BASE', lit(0)) \
+            .withColumn('DIFFERENCE', lit(0)) \
+            .withColumn('MATCH', lit(0)) \
+            .withColumn('NO_MATCH', lit(0)) \
+            .withColumn('PERCENT', lit("0%"))
+        print("Arquivo do mes anterior inexistente, gerado dataframe com lit 0")
+    return df_mes_ant
+
+      
+#FUNÇÃO PARA REMOVER ZEROS
+def zeroTo1(number):
+    if int(number) == 0:
+        print(str(number) + "--> 1")
+        number = int(1)
+    else:
+        number = number
+
+    return number 
+
+
+def calc_dif(df_main, dif_mes, join="inner"):
+    df_main_join = df_main.join(dif_mes, "AMBIT", join) \
+        .withColumn("DIF_COUNT_BASE", df_main["COUNT_BASE"] - dif_mes["COUNT_BASE"])    
+    df_main = df_main_join.select(\
+        df_main.AMBIT,
+        df_main.COUNT_LAKE,
+        df_main.COUNT_BASE,
+        df_main.DIFFERENCE,
+        df_main.MATCH,
+        df_main.NO_MATCH,
+        df_main.PERCENT,
+        "DIF_COUNT_BASE")
+    return df_main
+
+if __name__ == '__main__':
+    main()
+
+
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#Comandos Basicos
+
+#Filter + Between/Not Between
+df_nkey = df_nkey.filter("(MTM) NOT BETWEEN 5.000 AND 10.000")
+
+#Filter + WithColumn + Variavel
+cond1 = (col('in_acordo') * col('dias_atraso'))
+df2 = df1.filter((col("flag") == 'A')).withColumn(('total'), cond1)
+df3 = df1.filter((col("flag") != 'A')).withColumn(('total'), cond1)
+df3.show(10, False)
+
+#Alter Table - Change Type
+hive -e "ALTER TABLE smart_ros.tb_native_key_mock change MTM MTM decimal(9,6)";
+#Alter Table - Drop Partition
+hive -e "ALTER TABLE ${BANCO}.${TABELA} DROP IF EXISTS PARTITION (dt_ref < ${DATE_RET})";
+
+#CREATE DF MOCK
+row1 = Row(flag = 'A', in_acordo = 0, sit_opr_cdt = 0, dias_atraso = 0, dias_atraso_acordo = 9, qt_ars_prc = 0, qt_dia_atr = 0)
+row2 = Row(flag = 'A', in_acordo = 0, sit_opr_cdt = 4, dias_atraso = 1, dias_atraso_acordo = 9, qt_ars_prc = 0, qt_dia_atr = 0)
+row3 = Row(flag = 'A', in_acordo = 0, sit_opr_cdt = 0, dias_atraso = 1, dias_atraso_acordo = 9, qt_ars_prc = 0, qt_dia_atr = 0)
+row4 = Row(flag = 'A', in_acordo = 1, sit_opr_cdt = 0, dias_atraso = 9, dias_atraso_acordo = 0, qt_ars_prc = 0, qt_dia_atr = 0)
+row5 = Row(flag = 'A', in_acordo = 1, sit_opr_cdt = 0, dias_atraso = 9, dias_atraso_acordo = 0, qt_ars_prc = 0, qt_dia_atr = 1)
+row6 = Row(flag = 'A', in_acordo = 1, sit_opr_cdt = 4, dias_atraso = 9, dias_atraso_acordo = 1, qt_ars_prc = 0, qt_dia_atr = 0)
+row7 = Row(flag = 'N', in_acordo = 0, sit_opr_cdt = 0, dias_atraso = 9, dias_atraso_acordo = 9, qt_ars_prc = 0, qt_dia_atr = 0)
+row8 = Row(flag = 'N', in_acordo = 1, sit_opr_cdt = 4, dias_atraso = 9, dias_atraso_acordo = 9, qt_ars_prc = 0, qt_dia_atr = 0)
+df = spark.createDataFrame([row1,row2,row3,row4,row5,row6,row7,row8])
+
+#CONDITIONS
+cond1 = (col("flag") == 'A')
+cond2 = (col("in_acordo") == 0)
+cond3 = (col("dias_atraso") != 0)
+cond4 = (col("qt_ars_prc") != 0)
+cond5 = (col("sit_opr_cdt") != 4)
+
+#FILTER + CONDITIONS
+df1 = df.filter((col("flag") == 'A') & (col("in_acordo") == 0) & ((col("dias_atraso") != 0) | (col("qt_ars_prc") != 0)) & (col("sit_opr_cdt") != 4))
+df2 = df.filter(cond1 & cond2 & (cond3 | cond4) & cond5)
+
+#Filter + Between/Not Between
+df_nkey = df_nkey.filter("(MTM) NOT BETWEEN 5.000 AND 10.000")
+
+#Filter + WithColumn + Variavel
+cond1 = (col('in_acordo') * col('dias_atraso'))
+df2 = df1.filter((col("flag") == 'A')).withColumn(('total'), cond1)
+df3 = df1.filter((col("flag") != 'A')).withColumn(('total'), cond1)
+df3.show(10, False)
+
+#FILTER / DROP
+jm_cto_categ2 = jm_cto_categ2.filter('FINCALCU == 1').drop('FINCALCU')
+
+#WHERE
+df_reais = df_main.where("nvl(contrato,'') != ''  AND contrato != '-99100' AND LPAD(contrato,29,'0') != '00000000000000000000000000000' ")
+df_fic = df_main.where("nvl(contrato,'') = ''   OR contrato = '-99100' OR LPAD(contrato,29,'0') = '00000000000000000000000000000' ")
+
+#DISTINCT
+df_main = df_main.distinct()
+
+#ORDER BY / window que particiona por campo X
+jm_cto_categ2 = jm_cto_categ2.withColumn('ID', row_number().over(Window.partitionBy( jm_cto_categ2.contra1).\
+                                                    orderBy(col('contra1').desc(),\
+                                                            col('FAC').desc() ))).\
+                                                            cache().filter('ID == 1').drop('ID')
+
+#GROUPBY
+df_capit_ries = df_capit_ries.groupBy('r9624_contra1') \
+            .agg(\
+            {\
+                'r9624_idnumcli':'max',
+                'r9624_udad_rgo':'first',
+                'r9624_ead_cer':'sum',
+                'r9624_m_cer':'max',
+                'r9624_pd_cer':'first',
+                'r9624_lgd_cer':'first',
+                'r9624_cer_rv':'sum',
+                'r9624_corr_cer':'first',
+                'id':'max'
+            }) \
+            .select(\
+                (col('max(r9624_idnumcli)').alias('r9624_idnumcli')),
+                (col('first(r9624_udad_rgo)').alias('r9624_udad_rgo')),
+                (col('sum(r9624_ead_cer)').alias('r9624_ead_cer')),
+                (col('max(r9624_m_cer)').alias('r9624_m_cer')),
+                (col('first(r9624_pd_cer)').alias('r9624_pd_cer')),
+                (col('first(r9624_lgd_cer)').alias('r9624_lgd_cer')),
+                (col('sum(r9624_cer_rv)').alias('r9624_cer_rv')),
+                (col('first(r9624_corr_cer)').alias('r9624_corr_cer')),
+                (col('max(id)').alias('id')),
+                'r9624_contra1')
+
+#GROUPBY.SELECT
+df_interv_cto = df_interv_cto.groupBy('contra1_interv') \
+            .agg(\
+            {\
+            'idnumcli':'max'
+            }) \
+            .select(\
+                (col('max(idnumcli)').alias('idnumcli')),
+                'contra1_interv')
+
+##GROUPBY.AGG
+df_out = df_out.groupBy('t0254_contra1').agg(
+        _max('T0254_IDNUMCLI').alias('T0254_IDNUMCLI'),
+        _max('T0254_ORIGENCT').alias('T0254_ORIGENCT'),
+        _max('T0254_FLG_MMFF').alias('T0254_FLG_MMFF'),
+        _sum('T0254_RWA_PREM').alias('T0254_RWA_PREM'),
+        _sum('T0254_SDBNETPS').alias('T0254_SDBNETPS'),
+        _sum('T0254_SFBNETPS').alias('T0254_SFBNETPS'),
+        _sum('T0254_RWA_POSM').alias('T0254_RWA_POSM'),
+        _sum('T0254_RWADM_SF').alias('T0254_RWADM_SF'),
+        _max('T0254_CCF_SFB').alias('T0254_CCF_SFB'),
+        _max('T0254_FLGPYMFI').alias('T0254_FLGPYMFI'))
+
+
+
+#LIT
+df1 = df.withColumn('legal_entity_code', lit('0'))
+
+#LPAD
+row1 = Row(legal_entity_code = "0")
+row2 = Row(legal_entity_code = "123")
+row3 = Row(legal_entity_code = "1042")
+row4 = Row(legal_entity_code = "23")
+row5 = Row(legal_entity_code = "12356")
+df = spark.createDataFrame([row1,row2,row3,row4,row5])
+df1 = df.withColumn('legal_entity_code', lpad(col('legal_entity_code'),5,'0'))
+
+#NVL
+df_sfbsmv = df_flag_registro.withColumn('VL_SFBSMV', expr('(nvl(VL_SFBSFM, 0)) * (nvl(VL_VOLUME_SALDO_MEDIO, 0)/(if(VL_SALDO_PONTA = 0, 1, nvl(VL_SALDO_PONTA, 1))))'))
+#df_sfbsmv.select('CONTRATO','VL_SFBSMV','VL_VOLUME_SALDO_MEDIO','VL_SALDO_PONTA','VL_SALDO_PONTA').show(20,False)
+
+#CASE WHEN
+df_flag_mora = df_vencimento.withColumn('FLAG_MORA', expr("""CASE
+                                                        WHEN LPAD(CD_ESTADO_SALDO,2,'0') == '01' OR LPAD(CD_ESTADO_SALDO,2,'0') == '02'
+                                                            THEN 0
+                                                        WHEN LPAD(CD_ESTADO_SALDO,2,'0') == '03' OR LPAD(CD_ESTADO_SALDO,2,'0') == '04'
+                                                            THEN 1
+                                                    END""")).withColumn('FLAG_MORA', coalesce(col('FLAG_MORA'), lit(0)))
+#df_flag_mora.select('CONTRATO','FLAG_MORA','CD_ESTADO_SALDO').show(20,False)
+
+#CONCAT
+df_depara = df_depara.withColumn('contrato_altair', concat(col('cod_entidad'), col('cod_centro'), col('cod_producto'), col('cod_subprodu'), col('num_cuenta'), col('num_secuencia_cto')))
+
+#TRIM
+df_vencimento = df_sfbsmv.withColumn('DT_VENCIMENTO', expr("IF((DT_VENCIMENTO is NULL OR trim(DT_VENCIMENTO) == '' OR trim(DT_VENCIMENTO) == 0), '01/01/9999', DT_VENCIMENTO)"))
+#df_vencimento.select('CONTRATO','DT_VENCIMENTO').show(20,False)
+
+#UPPER / isin
+df_cliente = df_rateio_ok.filter(~upper(trim(col('CD_SEGTO_F'))).isin(segex_splited))
+
+df_tb_parametro = df_tb_parametro.filter('COLUNA_RORWA != "N\A"') \
+        .withColumn('CD_LN_ORI', lpad(col('CD_LN_ORI'),4,'0')) \
+        .withColumn('TIPO_RATEIO', trim(upper(col('TIPO_RATEIO'))))
+
+
+#TRIM/UPPER
+df_main = df_main.withColumn('contrato_altair', when( ((trim(upper(df_main.sistema_mq12)) == "IX") & (df_main.subcredito == "2")), concat(df_main.contrato_altair,lit('1'))).otherwise(df_main.contrato_altair))
+
+#is null
+df_main = df_main.withColumn('CONTRATO_F', expr("if(CONTRATO_F is null, '--99999', CONTRATO_F)"))
+
+
+#DROP
+df_main = df_main.drop('subcredito')
+
+#DROP DUPLICATES
+df_cto_fic = df_cto_fic.dropDuplicates(['contrato', 'cd_linha_bp', 'penumper', 'ds_area_neg_local', 'cd_carteira_pv'])
+
+#CHUMBA CAMPO - COL
+df_main = df_main.withColumn('FLAG_CARTERIZADAS', col('FG_CARTERIZADA'))
+
+#EXPR - IF (Condição de outro campo)
+#(==)
+df1 = df.withColumn('VL_ROF', expr("if(COLUNA_RORWA == 'ROF', VL_RESULT_TOTAL, 0)"))
+#(in)
+df_main = df_main.withColumn('IMPORTE', expr("if(COLUNA_RORWA in ('CREDITOS','CAPTACOES'), VL_RESULT_TOTAL, 0)"))
+#(is NULL)
+df_vencimento = df_sfbsmv.withColumn('DT_VENCIMENTO', expr("IF((DT_VENCIMENTO is NULL OR trim(DT_VENCIMENTO) == '' OR trim(DT_VENCIMENTO) == 0), '01/01/9999', DT_VENCIMENTO)"))
+
+#STR
+date_in = datetime.strptime(str(date_in), '%Y%m')
+
+#SUBSTRING
+df_main = df_main.withColumn('DT_RENOVACAO',col('DT_RENOV').substr(1,10))
+
+#OTHERWISE
+df_main = df_main.withColumn('contrato_altair', when( ((trim(upper(df_main.sistema_mq12)) == "IX") & (df_main.subcredito == "2")), concat(df_main.contrato_altair,lit('1'))).otherwise(df_main.contrato_altair))
+
+#VERIFY / FOR
+for df in df_list:
+        df_main = verify_integrity(df_main, df, "contra1")
+    logging.info('CRUZAMENTO REALIZADO')
+
+#WindowSpec (particiona por dt_ref)
+    windowSpec = Window.partitionBy('dt_ref').orderBy('dt_ref')
+    df_main = df_main.withColumn("rowId", row_number().over(windowSpec)) \
+        .withColumn("Produto_Gestao", array(col("rowId"), col("Produto_Gestao"))) \
+        .drop("rowId")
+
+#WindowSpec II
+    WindowSpec = Window.partitionBy('contrato', 'cd_linha_bp', 'penumper', 'ds_area_neg_local', 'cd_carteira_pv')
+    df_cto_fic = df_cto_fic.withColumn('vl_saldo_ponta', _sum(df_cto_fic.vl_saldo_ponta).over(WindowSpec)) \
+        .withColumn('vl_result_total', _sum(df_cto_fic.vl_result_total).over(WindowSpec))
+
+#WINDOWSPEC
+windowSpec = Window.partitionBy('CONTRA1_BIS').orderBy('CONTRA1_BIS')
+df_main2 = df_main.withColumn('id', row_number().over(windowSpec))
+
+#REPARTITION (PARTITIONS)
+df_bdr_rorwa_real = df_bdr_rorwa_real.repartition(partitions)
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#TRY DO SELECT
+    try:
+        logging.info('INICIANDO LEITURA DA TABELA: {}'.format(nme_mensal_histo_name.upper()))
+        # Efetua o select com a particao para criar dataframe nme_mensal_histo
+        nme_mensal_histo = spark.sql("select * from {}.{} where data_particao = {} and upper(indicador_pool) != 'S'".format(database_mis, nme_mensal_histo_name, data_dia))
+
+        logging.info('INICIANDO LEITURA DA TABELA: {}'.format(tb_hi_depara_alt_bc_ati_name.upper()))
+        # Efetua o select com a particao para criar dataframe tb_contrato_bdr_altair
+        tb_hi_depara_alt_bc_ati = spark.sql("select * from {}.{} where dt_refe = {}".format(database_bma, tb_hi_depara_alt_bc_ati_name, data_mes))
+
+        logging.info('INICIANDO LEITURA DA TABELA: TB_PARAMETRO_RATEIO')
+        df_tb_parametro = spark.sql("select distinct CD_LN_ORI from ror.tb_parametro_rateio where dat_ref_carga like '{}%'".format(data_rateio))
+
+    except StandardError as erro:
+        logging.info(erro)
+        sys.exit(4)
+
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#COMANDOS SPARK / HDFS
+
+#Read Parquet
+df = spark.read.format('parquet').load('/sistemas/ror/saida/df_real_ok_f1/part-00001-185988d5-14df-4c0a-af7d-1c6f42ac8e33-c000.snappy.parquet')
+
+#Spark Table
+df_real = spark.table("smart_ror.tb_contrato_nme_real").where(col("dt_ref") == lit("206002"))
+df_real.show()
+
+#Log Servidor
+while true; do ki; yarn logs --applicationId application_1579712432300_0321 --log_files stdout; sleep 2; done
+
+#HDFS
+hdfs dfs -ls /sistemas/ror/saida
+hdfs dfs -ls /sistemas/ror/saida/tb_contrato_rateio_f1
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+###Tipos de Mock's
+
+#Gerar HQL
+SET hive.msck.path.validation=ignore;
+
+DROP TABLE IF EXISTS SMART_ROS.TB_NATIVE_KEY_MOCK ;
+
+CREATE EXTERNAL TABLE SMART_ROS.TB_NATIVE_KEY_MOCK ( 
+	  CONTRATO STRING,
+      DOMAIN_CODE STRING,
+      PENUMPER STRING,
+	  MASTER_KEY STRING,
+      #SALDO DECIMAL(4,4)
+	  SEGMENTATION_CODE STRING)
+
+COMMENT 'NATIVE KEY MOCK KPI' 
+
+PARTITIONED BY (DT_REF STRING) 
+STORED AS PARQUET 
+LOCATION '/sistemas/ros/entrada/mock_kpi'
+TBLPROPERTIES ("PARQUET.COMPRESS"="SNAPPY");
+
+#Rodar HQL 
+hive -f /home/x226936/mock/tb_native_key_mock.hql
+
+#Imports
+# -*- coding: utf-8 -*-
+from pyspark.sql.functions import lit, col
+from pyspark.sql import Row
+spark.conf.set("hive.exec.dynamic.partition","true")
+spark.conf.set("hive.exec.dynamic.partition.mode","nonstrict") 
+
+#Function
+def write_hive_table(spark, df, dbName, tableName, overwrite=True):
+    tableColumns = [list(x) for x in (spark.catalog.listColumns(tableName, dbName))]
+    orderedColumns = [x[0] for x in tableColumns]
+    dfWithSchemaOrdered = df.select(*orderedColumns)
+    dfWithSchemaOrdered.show(10,False)
+    dfWithSchemaOrdered.write.insertInto('smart_ros.tb_native_key_mock', True)
+
+#Row
+row1 = Row(Currency = 'USD', MTM = 10.0000, MatAmount = 10.0000, dt_ref = '206002')
+row2 = Row(Currency = 'USD', MTM = 10.0000, MatAmount = 20.0000, dt_ref = '206002')
+row3 = Row(Currency = 'USD', MTM = 10.0000, MatAmount = 30.0000, dt_ref = '206002')
+row4 = Row(Currency = 'BRL', MTM = 5.0000, MatAmount = 10.0000, dt_ref = '206002')
+row5 = Row(Currency = 'BRL', MTM = 5.0000, MatAmount = 100.0000, dt_ref = '206002')
+
+#Create DataFrame
+df1 = spark.createDataFrame([row1,row2,row3,row4,row5])
+df1.show(10, False)
+
+#Filter + WithColumn + Variavel
+cond1 = (col('MTM') * col('MatAmount'))
+df2 = df1.filter((col("Currency") == 'USD')).withColumn(('total'), cond1)
+df3 = df1.filter((col("Currency") != 'USD')).withColumn(('total'), cond1)
+df3.show(10, False)
+
+#Write Hive Table
+write_hive_table(spark, df2, 'smart_ros', 'tb_native_key_mock')
+df_result_1 = spark.sql("select * from  smart_ros.tb_native_key_mock where dt_ref = '206002'")
+df_result_1.show(100,False)
+
+#MOCK GERADO A PARTIR DE TABELA JA EXISTENTE
+#Spark Table
+df_real = spark.table("smart_ror.tb_contrato_nme_real").where(col("dt_ref") == lit("206002"))
+df_real.show()
+
+#Spark.Sql
+df_tb_parametro = spark.sql("select distinct CD_LN_ORI, DSC_LN_ORI from ror.tb_parametro_rateio where dat_ref_carga like '{}%'".format(data_rateio))
+
+#Filtering
+#cria df_bdr_rorwa_fict contendo apenas contratos ficticios (-99200) e df_bdr_rorwa_real contendo contratos reais
+df_bdr_rorwa_fict, df_bdr_rorwa_real = filtering(df_bdr_rorwa, 'contra1_bis', '-99200')
+
+#MOCK DO BACCHI
+layout = []
+header = ['CONTRATO', 'CD_LINHA_BP', 'DS_LINHA_BP', 'PENUMPER', 'CD_SEGTO', 'CD_CARTEIRA_PV', 'VL_SALDO_PONTA', 'VL_RESULT_TOTAL', 'DS_AREA_NEG_LOCAL']
+for item in header:
+    layout.append(item.lower())
+
+list1 = ['-99100', '200', 'Over_59', '-99100', 'BP - CORPORATE', '-99100', 1, 90,'Over_59']
+list2 = ['-99100', '591', 'Comissoes', '-99100', 'BP - MISTO', '234', 2, 40,'Comissoes']
+list3 = ['-99100', '649', 'Comissoes', '12', '', '-99100', 3, 100,'Comissoes']
+list4 = ['-99100', '944', 'ROF', '-99100', 'BP - SHIMA', '-99100', 4, 3,'ROF']
+list5 = ['-99100', '949', 'ROF', '-99100', 'BP - SHIMA', '-99100', 5, 10,'ROF']
+list6 = ['-99100', '128', 'Demais_Ativos', '-99100', 'BP - ARIEL', '-99100', 6, 20,'Demais_Ativos']
+
+df2 = spark.createDataFrame([list1, list2, list3, list4, list5, list6], layout)
+
+dbName = 'smart_ror'
+tableName = 'tb_contrato_nme_ficticio'
+anomes = '206002'
+
+from pyspark.sql.functions import lit, col
+spark.conf.set("hive.exec.dynamic.partition","true")
+spark.conf.set("hive.exec.dynamic.partition.mode","nonstrict") 
+
+def fill_columns(spark, df, dbName, tableName):
+    table = spark.catalog.listColumns(tableName, dbName)
+    table_type = [[str(x[0]), str(x[2])] for x in table]
+    for item in table_type:
+        if item[1] != 'string':
+            print("DATA_TYPE: " + item[1])
+            if item[0] in df.columns:
+                print('TEM: ' + item[0] + ' do DATA_TYPE: ' + item[1])
+            else:
+                print('NAO TEM:' + item[0] + ' do DATA_TYPE: ' + item[1])
+                print('ADICIONANDO NO DF')
+                df = df.withColumn(item[0], lit(0))
+        else:
+            print("DATA_TYPE: " + item[1])
+            if item[0] in df.columns:
+                print('TEM: ' + item[0] + ' do DATA_TYPE: ' + item[1])
+            else:
+                print('NAO TEM:' + item[0] + ' do DATA_TYPE: ' + item[1])
+                print('ADICIONANDO NO DF')
+                df = df.withColumn(item[0], lit(""))
+    return df
+
+df3 = fill_columns(spark, df2, dbName, tableName).withColumn('dt_ref', lit(anomes))
+
+layout = []
+header = ['CONTRATO', 'CD_LINHA_BP', 'DS_LINHA_BP', 'PENUMPER', 'CD_SEGTO', 'CD_CARTEIRA_PV', 'VL_SALDO_PONTA', 'VL_RESULT_TOTAL']
+for item in header:
+    layout.append(item.lower())
+
+df2 = spark.createDataFrame([row1, row2, row3, row4, row5, row6, row7, row8, row9, row10, row11, row12], layout)
+df2.show()
+
+df3 = fill_columns(spark, df2, dbName, tableName).withColumn('dt_ref', lit('206002'))
+df3.show()
+
+def write_hive_table(spark, df, dbName, tableName, overwrite=True):
+    tableColumns = [list(x) for x in (spark.catalog.listColumns(tableName, dbName))]
+    orderedColumns = [x[0] for x in tableColumns]
+    dfWithSchemaOrdered = df.select(*orderedColumns)
+
+write_hive_table(spark, df_ficticio, dbName, tableName)
+
+df3.repartition(10).write.insertInto('{}.{}'.format('smart_ror', 'tb_contrato_nme_ficticio', True))
+
+df4 = spark.table(dbName + "." + tableName).where(col('dt_ref') == lit(anomes))
+df_teste = spark.table("smart_ror.tb_contrato_nme_ficticio").filter(col("dt_ref") == lit("206002"))
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#EXTRAÇÂO CSV - CORP
+
+    #CRIANDO TIPO / CAMINHO
+    if tipo_carteira == 'A':
+            logging.info('SELECIONANDO REGISTROS ATIVOS.')
+            stringSQL += " and upper(cd_carte_cliente) == 'A' "
+        else:
+            logging.info('SELECIONANDO REGISTROS PASSIVO.')
+            stringSQL += " and nvl(cd_carte_cliente,'') != 'A' " 
+
+        logging.info('Query: {}'.format(stringSQL))
+
+        df_tb_corp_ativo_passivo = spark.sql(stringSQL)
+
+        logging.info('SUBSTRING NO CAMPO IdProductoGestion')
+        df_tb_corp_ativo_passivo = df_tb_corp_ativo_passivo.withColumn('IdProductoGestion', substring_index('IdProductoGestion', ",", -1))
+        df_tb_corp_ativo_passivo = df_tb_corp_ativo_passivo.withColumn('IdProductoGestion', substring_index('IdProductoGestion', "]", 1))
+
+        lc_nome_arquivo = caminho_extracao
+        tipo_descricao = 'Passivo'
+        if tipo_carteira == 'A':
+            tipo_descricao = 'Ativo'
+            lc_nome_arquivo += '/ACTIVO_BRA_'
+        else:
+            lc_nome_arquivo += '/PASIVO_BRA_'
+
+        logging.info('MOSTRANDO CORP {} - GERACAO DO ARQUIVO {}.'.format(tipo_descricao, lc_nome_arquivo) )
+        
+        # Efetua geracao da saida em txt
+        vrc = 1
+
+
+#MASCARAMENTO DE CAMPOS
+df_tb_corp_ativo_passivo_saida = df_tb_corp_ativo_passivo     
+
+    logging.info('PARAMETROS - EXTRACAO {} TIPO CARTEIRA {}.'.format(tipo_extracao, tipo_carteira) )
+
+    if int(tipo_extracao) == 1:
+        logging.info('FILTRO PARA RATIO FINAL(1) - TipPers == {}'.format('J') )
+        df_tb_corp_ativo_passivo_saida = df_tb_corp_ativo_passivo_saida.where("TipPers == 'J'")
+    elif int(tipo_extracao) == 2:
+        logging.info('FILTRO PARA RESTATEO OFICIAL(2) - CASO FOR F - MASCARA XXX EM NombreClien E NIFCIF' )
+        df_tb_corp_ativo_passivo_saida = df_tb_corp_ativo_passivo_saida.withColumn('NombreClien', when( (df_tb_corp_ativo_passivo.TipPers == 'F'), lit('xxx') ).otherwise(df_tb_corp_ativo_passivo.NombreClien)) 
+        df_tb_corp_ativo_passivo_saida = df_tb_corp_ativo_passivo_saida.withColumn('NIFCIF', when( (df_tb_corp_ativo_passivo.TipPers == 'F'), lit('xxx') ).otherwise(df_tb_corp_ativo_passivo.NIFCIF))
+
+        logging.info('MOSTRANDO REGISTROS CASO FOR F Tipo2- MASCARA XXX EM NombreClien E NIFCIF' )
+    elif int(tipo_extracao) == 3:
+        logging.info('FILTRO PARA REPROCESO OFICIAL(3) - CASO FOR F - MASCARA XXX EM NombreClien, NIFCIF E IdClienteMis' )
+        df_tb_corp_ativo_passivo_saida = df_tb_corp_ativo_passivo_saida.withColumn('NombreClien', when( (df_tb_corp_ativo_passivo.TipPers == 'F'), lit('xxx') ).otherwise(df_tb_corp_ativo_passivo.NombreClien))
+        df_tb_corp_ativo_passivo_saida = df_tb_corp_ativo_passivo_saida.withColumn('NIFCIF', when( (df_tb_corp_ativo_passivo.TipPers == 'F'), lit('xxx') ).otherwise(df_tb_corp_ativo_passivo.NIFCIF) )
+        df_tb_corp_ativo_passivo_saida = df_tb_corp_ativo_passivo_saida.withColumn('IdClienteMis', when( (df_tb_corp_ativo_passivo.TipPers == 'F'), lit('xxx') ).otherwise(df_tb_corp_ativo_passivo.IdClienteMis) )
+
+        logging.info('MOSTRANDO REGISTROS CASO FOR F - Tipo3 - MASCARA XXX EM NombreClien/NIFCIF/IdClienteMis' )
+    else:
+        logging.info('MOSTRANDO REGISTROS SEM MASCARA E SEM FILTRO CASOS 4/5/6/7' )
+
+    df_tb_corp_ativo_passivo_saida.cache().count()
+
+    #base_filename = str(tipo_extracao)
+    base_filename = '1'
+    base_filename += '_' + str_data_mes
+
+
+# GERANDO ARQUIVO CSV 
+
+    #logging.info("CRIANDO DIRETORIO: {}".format(caminho_extracao))
+    print caminho_extracao
+
+    try:
+        subprocess.call(['hdfs', 'dfs', '-mkdir', '-p', caminho_extracao])
+
+        lc_nome_arquivo = lc_nome_arquivo + base_filename
+
+        caminho_extracao = lc_nome_arquivo
+        lcCaminhoArquivo = os.path.join(caminho_extracao, lc_nome_arquivo)
+
+        logging.info('PATH DE DESTINO [ ARQUIVO PASTA HDFS ] : {}'.format(lcCaminhoArquivo))
+
+        df_tb_corp_ativo_passivo_saida.coalesce(1).write.format('csv').mode('overwrite').options(delimiter='|').options(header=True).save(lcCaminhoArquivo)
+
+        logging.info("REMOVENDO ARQUIVO JÁ EXISTIR {}".format(lcCaminhoArquivo + '.txt'))
+        subprocess.call(['hdfs', 'dfs', '-rm', lcCaminhoArquivo + '.txt'])
+
+        logging.info("MOVENDO ARQUIVO GERADO HDFS {} /*.csv para {}.txt [ arquivo em txt ]".format(lc_nome_arquivo, lcCaminhoArquivo))
+
+        subprocess.call(['hdfs', 'dfs', '-mv', lc_nome_arquivo + "/*.csv", lcCaminhoArquivo + '.txt'])
+
+        logging.info("REMOVENDO PASTA HDFS {}".format(lc_nome_arquivo))
+        
+        subprocess.call(['hdfs', 'dfs', '-rm', '-R', lc_nome_arquivo])
+
+        vrc = 0
+    except ValueError as error:
+        print ("error saving " + str(error))
+
+    spark.stop()
+    sys.exit(vrc)
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#dos2unix
+find . -type f -print0 | xargs -0 dos2unix
+exit 0
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+#TREINO
+
+### IMPORTANDO FUNÇÕES
+from pyspark.sql import Row
+from pyspark.sql.window import *
+from pyspark.sql.functions import sum as _sum, max as _max, lit, col, row_number, desc, split, when, WindowSpec
+
+### CRIANDO LINHAS 
+row1 = Row(CONTRA1='1', SOMAR='10', MAX='3', DUPLICADO='chumbar_dupli', TROCAR='trocar_nome')
+row2 = Row(CONTRA1='1', SOMAR='4', MAX='2', DUPLICADO='chumbar_dupli', TROCAR='trocar_nome')
+row3 = Row(CONTRA1='1', SOMAR='1', MAX='1', DUPLICADO='chumbar_dupli', TROCAR='trocar_nome')
+row4 = Row(CONTRA1='2', SOMAR='8', MAX='10', DUPLICADO='chumbar_dupli', TROCAR='trocar_nome')
+row5 = Row(CONTRA1='2', SOMAR='2', MAX='5', DUPLICADO='chumbar_dupli', TROCAR='trocar_nome')
+
+### GERANDO DATAFRAME
+df1 = spark.createDataFrame([row1, row2, row3, row4, row5])
+
++-------+-------------+---+-----+-----------+
+|CONTRA1|    DUPLICADO|MAX|SOMAR|     TROCAR|
++-------+-------------+---+-----+-----------+
+|      1|chumbar_dupli|  3|   10|trocar_nome|
+|      1|chumbar_dupli|  2|    4|trocar_nome|
+|      1|chumbar_dupli|  1|    1|trocar_nome|
+|      2|chumbar_dupli| 10|    8|trocar_nome|
+|      2|chumbar_dupli|  5|    2|trocar_nome|
++-------+-------------+---+-----+-----------+
+
+### APLICANDO GROUPBY 
+df2 = df1.groupBy('CONTRA1').agg(_max('MAX').alias('MAX'), _sum('SOMAR').alias('SOMAR'), _max('DUPLICADO').alias('DUPLICADO'), _max('TROCAR').alias('TROCAR'))
+
++-------+---+-----+-------------+-----------+
+|CONTRA1|MAX|SOMAR|    DUPLICADO|     TROCAR|
++-------+---+-----+-------------+-----------+
+|      1|  3| 15.0|chumbar_dupli|trocar_nome|
+|      2|  5| 10.0|chumbar_dupli|trocar_nome|
++-------+---+-----+-------------+-----------+
+
+### CRIANDO ROW_NUMBER
+df3 = df2.withColumn('ID', row_number().over(Window.partitionBy(df2.CONTRA1).\
+                                                    orderBy(col('SOMAR').desc(),\
+                                                    col('MAX').desc()))).\
+                                                    cache().filter('ID == 1').drop('ID')
+
++-------+---+-----+-------------+-----------+
+|CONTRA1|MAX|SOMAR|    DUPLICADO|     TROCAR|
++-------+---+-----+-------------+-----------+
+|      1|  3| 15.0|chumbar_dupli|trocar_nome|
+|      2|  5| 10.0|chumbar_dupli|trocar_nome|
++-------+---+-----+-------------+-----------+
+
+### 
+df4 = df1.withColumn('ID', row_number().over(Window.partitionBy(df2.CONTRA1).orderBy(col('SOMAR').desc(),col('MAX').desc()))).cache().filter('ID == 1').drop('ID')
+df5 = df4.withColumnRenamed('TROCAR', 'NOME_TROCADO')
++-------+-------------+---+-----+-----------+
+|CONTRA1|    DUPLICADO|MAX|SOMAR|     TROCAR|
++-------+-------------+---+-----+-----------+
+|      1|chumbar_dupli|  2|    4|trocar_nome|
+|      2|chumbar_dupli| 10|    8|trocar_nome|
++-------+-------------+---+-----+-----------+
+
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+### --------------------------------------------------------------------------------------------------
+
+
+
+
+
